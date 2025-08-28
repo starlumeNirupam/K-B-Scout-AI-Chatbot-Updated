@@ -1,3 +1,23 @@
+import sys
+import importlib
+
+try:
+    import pysqlite3  # installed via pysqlite3-binary
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except Exception:
+    # fallback: if not installed or something odd, try to import sqlite3 anyway
+    pass
+
+# (optional) sanity check: print the sqlite version to logs
+try:
+    import sqlite3
+    print("SQLite version:", sqlite3.sqlite_version)
+except Exception:
+    pass
+# ----------------------------------------------------------------
+
+import chromadb  # now safe to import
+
 import os
 import uuid
 from typing import List, Dict, Tuple
