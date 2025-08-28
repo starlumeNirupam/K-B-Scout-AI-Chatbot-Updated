@@ -66,7 +66,7 @@ pdfminer.six==20250506
 pdfplumber==0.11.7
 pillow==10.4.0
 posthog==5.4.0
-protobuf==6.32.0
+protobuf==5.27.3
 pyarrow==21.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
