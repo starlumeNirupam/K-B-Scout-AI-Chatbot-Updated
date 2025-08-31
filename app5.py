@@ -44,7 +44,7 @@ from openai import OpenAI
 # Load environment variables
 from dotenv import load_dotenv
 
-# Only load .env file in development (when file exists)
+# Only load .env file if it exists (for local development)
 if os.path.exists('.env'):
     load_dotenv()
 
@@ -53,76 +53,103 @@ if os.path.exists('.env'):
 # -----------------------------
 
 def get_openai_client() -> OpenAI:
-    """Get OpenAI client with improved Railway compatibility."""
+    """Get OpenAI client with Railway environment support."""
     
-    # Try multiple methods to get the API key
+    # Multiple methods to get API key for Railway compatibility
     key = None
     
-    # Method 1: Direct environment variable access
+    # Method 1: Direct environment variable (Railway's preferred method)
     key = os.environ.get("OPENAI_API_KEY")
     
-    # Method 2: Try getenv if environ didn't work
+    # Method 2: Try os.getenv as fallback
     if not key:
         key = os.getenv("OPENAI_API_KEY")
     
-    # Method 3: Force reload dotenv and try again (for local dev)
+    # Method 3: Force reload dotenv for local development
     if not key and os.path.exists('.env'):
         load_dotenv(override=True)
         key = os.getenv("OPENAI_API_KEY")
     
-    # Method 4: Try alternative environment variable names
+    # Method 4: Alternative variable names
     if not key:
-        key = os.environ.get("OPENAI_KEY") or os.environ.get("OPEN_AI_KEY")
+        key = os.environ.get("OPENAI_KEY") or os.environ.get("OPEN_AI_API_KEY")
     
-    # Validate the key
+    # Debug output for Railway (this will show in Railway logs)
+    print(f"API Key found: {bool(key)}")
+    if key:
+        print(f"API Key starts with: {key[:10]}...")
+        print(f"API Key length: {len(key)}")
+    else:
+        print("Available environment variables:")
+        env_keys = [k for k in os.environ.keys() if 'API' in k.upper() or 'OPENAI' in k.upper()]
+        print(f"API-related env vars: {env_keys}")
+        print("All environment variables:")
+        print(list(os.environ.keys()))
+    
     if not key:
         st.error("❌ No OpenAI API key found in environment variables.")
-        st.error("Please set OPENAI_API_KEY in your Railway service variables.")
+        st.error("Please set OPENAI_API_KEY in your Railway service environment variables.")
         
-        # Show debug info for troubleshooting
         with st.expander("Debug Information"):
-            st.write("Available environment variables:")
+            st.write("Railway Environment Variables Check:")
+            st.write(f"RAILWAY_ENVIRONMENT: {os.getenv('RAILWAY_ENVIRONMENT', 'Not detected')}")
+            st.write("Available environment variables containing 'API' or 'OPENAI':")
             env_vars = [k for k in os.environ.keys() if 'API' in k.upper() or 'OPENAI' in k.upper()]
             if env_vars:
                 st.write(env_vars)
             else:
                 st.write("No API-related environment variables found")
+                st.write("This suggests the OPENAI_API_KEY environment variable is not set in Railway")
         
         st.stop()
     
     # Validate key format
     if not key.startswith(('sk-', 'sk-proj-')):
         st.error("❌ Invalid OpenAI API key format. Key should start with 'sk-' or 'sk-proj-'")
+        st.error(f"Current key starts with: {key[:10]}")
         st.stop()
     
-    # Check key length (OpenAI keys are typically 51+ characters)
-    if len(key) < 20:
+    # Check key length
+    if len(key) < 40:
         st.error("❌ OpenAI API key appears to be truncated or incomplete.")
-        st.error(f"Current key length: {len(key)} characters (should be 51+)")
+        st.error(f"Current key length: {len(key)} characters (should be 40+ characters)")
         st.stop()
     
-    # Test the API key with a simple request
+    # Test the API key with Railway-friendly timeout and retry
     try:
-        test_client = OpenAI(api_key=key)
-        # Make a minimal API call to test the key
-        test_client.models.list()
-        return test_client
-    except Exception as e:
-        st.error(f"❌ OpenAI API key validation failed: {str(e)}")
-        if "401" in str(e) or "Incorrect API key" in str(e):
-            st.error("The API key is invalid or has been revoked. Please check your OpenAI account.")
-        elif "429" in str(e):
-            st.error("Rate limit exceeded. Please try again later.")
-        elif "timeout" in str(e).lower():
-            st.error("Network timeout. This might be a Railway connectivity issue.")
-        else:
-            st.error("There might be a network connectivity issue on Railway.")
+        print("Testing OpenAI API connection...")
+        test_client = OpenAI(api_key=key, timeout=30.0)  # Railway-friendly timeout
         
-        with st.expander("Troubleshooting"):
-            st.write("1. Verify your API key is correctly set in Railway service variables")
-            st.write("2. Check that your OpenAI account has available credits")
+        # Test API connection
+        test_response = test_client.models.list()
+        print("OpenAI API connection successful")
+        print(f"Number of models available: {len(test_response.data)}")
+        
+        return test_client
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"OpenAI API test failed: {error_msg}")
+        
+        st.error(f"❌ OpenAI API key validation failed: {error_msg}")
+        
+        # Specific error handling
+        if "401" in error_msg or "Incorrect API key" in error_msg:
+            st.error("The API key is invalid or has been revoked. Please check your OpenAI account.")
+        elif "429" in error_msg:
+            st.error("Rate limit exceeded. Please try again later.")
+        elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+            st.error("Network timeout or connection issue. This is common on Railway.")
+            st.info("Try redeploying your Railway service or check Railway's status page.")
+        else:
+            st.error("There might be a network connectivity issue.")
+        
+        with st.expander("Troubleshooting Steps"):
+            st.write("1. Verify your API key is correctly set in Railway service variables (not project variables)")
+            st.write("2. Ensure your OpenAI account has available credits")
             st.write("3. Try redeploying your Railway service")
-            st.write("4. Check Railway's status page for network issues")
+            st.write("4. Check if Railway is experiencing network issues")
+            st.write("5. Verify the API key works in a local environment")
         
         st.stop()
 
@@ -167,7 +194,7 @@ def read_pdf(file) -> list[tuple[str, dict]]:
             if text.strip():
                 pages.append((text, {"source": file.name, "type": "pdf", "page": i+1}))
             else:
-                # OCR fallback (might not work on Railway due to system dependencies)
+                # OCR fallback (may not work on Railway due to system dependencies)
                 try:
                     images = convert_from_path(file.name, first_page=i+1, last_page=i+1, dpi=300)
                     ocr_text = ""
@@ -175,8 +202,8 @@ def read_pdf(file) -> list[tuple[str, dict]]:
                         ocr_text += pytesseract.image_to_string(img)
                     pages.append((ocr_text, {"source": file.name, "type": "pdf", "page": i+1}))
                 except Exception as ocr_error:
-                    # If OCR fails (common on Railway), add empty page with warning
-                    st.warning(f"OCR failed for page {i+1} of {file.name}. Text extraction may be incomplete.")
+                    print(f"OCR failed for page {i+1} of {file.name}: {ocr_error}")
+                    # If OCR fails, add empty page
                     pages.append(("", {"source": file.name, "type": "pdf", "page": i+1}))
         return pages
     except Exception as e:
@@ -241,23 +268,30 @@ class RAGChunk:
 
 def get_chroma_client():
     """Creates a persistent ChromaDB client with Railway compatibility."""
-    # Use different path for Railway vs local
-    if os.getenv("RAILWAY_ENVIRONMENT"):
-        persist_dir = "/tmp/chromadb_storage"  # Railway temp directory
+    # Use Railway-appropriate storage path
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        persist_dir = "/tmp/chromadb_storage"  # Railway ephemeral storage
+        print("Using Railway ephemeral storage for ChromaDB")
     else:
-        persist_dir = "./chromadb_storage"  # Local directory
+        persist_dir = "./chromadb_storage"  # Local development
+        print("Using local storage for ChromaDB")
     
     try:
         os.makedirs(persist_dir, exist_ok=True)
         client = chromadb.PersistentClient(path=persist_dir)
+        print(f"ChromaDB client created successfully at {persist_dir}")
         return client
     except Exception as e:
+        print(f"Could not create persistent client: {e}")
         st.error(f"Could not create persistent client: {e}")
-        # Fallback to in-memory client for Railway
+        
+        # Fallback to in-memory client
         try:
-            st.warning("Falling back to in-memory database (data will not persist between deployments)")
+            print("Falling back to in-memory ChromaDB client")
+            st.warning("Using in-memory database (data will not persist between deployments)")
             return chromadb.Client()
         except Exception as fallback_error:
+            print(f"Complete database initialization failed: {fallback_error}")
             st.error(f"Complete database initialization failed: {fallback_error}")
             return None
 
@@ -269,51 +303,62 @@ def get_or_create_collection(chroma_client, collection_name: str = "kb_scout_doc
     try:
         # Try to get existing collection first
         collection = chroma_client.get_collection(name=collection_name)
+        print(f"Using existing collection: {collection_name}")
         return collection
     except:
         # Create new collection if it doesn't exist
         try:
-            return chroma_client.create_collection(
+            collection = chroma_client.create_collection(
                 name=collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
+            print(f"Created new collection: {collection_name}")
+            return collection
         except Exception as e:
+            print(f"Error creating collection: {e}")
             st.error(f"Error creating collection: {e}")
             return None
 
 def embed_texts(client: OpenAI, texts: List[str], model: str = "text-embedding-3-small", batch_size: int = 50) -> List[List[float]]:
-    """Batches embeddings to avoid hitting request-size limits. Reduced batch size for Railway."""
+    """Batches embeddings with Railway-friendly settings."""
     if not texts:
         return []
+    
+    print(f"Creating embeddings for {len(texts)} texts using {model}")
     
     all_embeddings: List[List[float]] = []
     total_batches = (len(texts) + batch_size - 1) // batch_size
     
-    progress_bar = st.progress(0)
-    
+    # Progress tracking for Railway logs
     for i in range(0, len(texts), batch_size):
         batch_num = (i // batch_size) + 1
-        progress = batch_num / total_batches
-        progress_bar.progress(progress)
-        
+        print(f"Processing embedding batch {batch_num}/{total_batches}...")
         st.write(f"Processing embedding batch {batch_num}/{total_batches}...")
         
         batch = texts[i:i + batch_size]
         try:
+            # Railway-friendly API call with timeout and retry logic
             resp = client.embeddings.create(
                 input=batch, 
                 model=model,
-                timeout=30  # Add timeout for Railway
+                timeout=60.0  # Increased timeout for Railway
             )
             batch_embeddings = [d.embedding for d in resp.data]
             all_embeddings.extend(batch_embeddings)
+            print(f"Successfully processed batch {batch_num}")
+            
         except Exception as e:
+            print(f"Error creating embeddings for batch {batch_num}: {e}")
             st.error(f"Error creating embeddings for batch {batch_num}: {e}")
+            
             if "timeout" in str(e).lower():
-                st.error("Network timeout occurred. This is common on Railway. Try uploading fewer files at once.")
+                st.error("Network timeout occurred. Try uploading fewer files at once.")
+            elif "rate_limit" in str(e).lower() or "429" in str(e):
+                st.error("Rate limit hit. Please wait a moment and try again.")
+            
             return []
     
-    progress_bar.progress(1.0)
+    print(f"Successfully created {len(all_embeddings)} embeddings")
     return all_embeddings
 
 def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChunk]):
@@ -325,6 +370,8 @@ def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChu
     if not valid_chunks:
         return False
     
+    print(f"Adding {len(valid_chunks)} chunks to collection")
+    
     documents = [c.text for c in valid_chunks]
     metadatas = [c.metadata for c in valid_chunks]
     ids = [c.id for c in valid_chunks]
@@ -332,6 +379,7 @@ def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChu
     embeddings = embed_texts(client, documents)
     
     if not embeddings or len(embeddings) != len(documents):
+        print("Failed to create embeddings or count mismatch")
         return False
 
     try:
@@ -341,8 +389,10 @@ def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChu
             ids=ids,
             embeddings=embeddings
         )
+        print("Successfully added chunks to collection")
         return True
     except Exception as e:
+        print(f"Error adding to collection: {e}")
         st.error(f"Error adding to collection: {e}")
         return False
 
@@ -352,26 +402,36 @@ def retrieve(collection, client: OpenAI, query: str, top_k: int = 6) -> List[Tup
     
     try:
         count = collection.count()
+        print(f"Collection has {count} documents")
         if count == 0:
             return []
-    except:
+    except Exception as e:
+        print(f"Error getting collection count: {e}")
         return []
     
     try:
+        print(f"Creating query embedding for: {query[:100]}...")
         q_emb = embed_texts(client, [query])[0]
+        
+        print(f"Querying collection for top {min(top_k, count)} results...")
         res = collection.query(
             query_embeddings=[q_emb],
             n_results=min(top_k, count),
             include=["documents", "metadatas", "distances"]
         )
+        
         docs = res.get("documents", [[]])[0]
         metas = res.get("metadatas", [[]])[0]
         dists = res.get("distances", [[]])[0]
         
         scored = list(zip(docs, metas, dists))
         scored.sort(key=lambda x: x[2])
+        
+        print(f"Retrieved {len(scored)} relevant documents")
         return scored
+        
     except Exception as e:
+        print(f"Error during retrieval: {e}")
         st.error(f"Error during retrieval: {e}")
         return []
 
@@ -403,7 +463,7 @@ def get_uploaded_files_from_collection(collection):
         
         return list(files)
     except Exception as e:
-        st.warning(f"Could not retrieve file list: {e}")
+        print(f"Error getting uploaded files list: {e}")
         return []
 
 SYSTEM_PROMPT = """You are K&B Scout AI, a helpful enterprise document assistant.
@@ -415,6 +475,8 @@ Follow these rules:
 """
 
 def answer_with_rag(client: OpenAI, question: str, context_text: str):
+    print(f"Generating response for question: {question[:100]}...")
+    
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -429,12 +491,11 @@ def answer_with_rag(client: OpenAI, question: str, context_text: str):
             messages=messages,
             temperature=0.0,
             stream=True,
-            timeout=30  # Add timeout for Railway
+            timeout=60.0  # Railway-friendly timeout
         )
     except Exception as e:
+        print(f"Error generating response: {e}")
         st.error(f"Error generating response: {e}")
-        if "timeout" in str(e).lower():
-            st.error("Request timed out. This is common on Railway. Please try again.")
         return None
 
 # -----------------------------
@@ -632,41 +693,38 @@ st.markdown(
         .css-1rs6os, .css-17eq0hr {
             display: none;
         }
-        
-        /* Progress bar styling */
-        .stProgress > div > div > div > div {
-            background-color: #667eea;
-        }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Show environment info for debugging (remove in production)
-if os.getenv("RAILWAY_ENVIRONMENT"):
-    st.sidebar.info("Running on Railway")
-    
-    # Debug panel (optional - remove for production)
-    with st.sidebar.expander("Debug Info"):
-        st.write(f"Railway Environment: {os.getenv('RAILWAY_ENVIRONMENT', 'Not detected')}")
-        st.write(f"Has OPENAI_API_KEY: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No'}")
-        if os.getenv('OPENAI_API_KEY'):
-            key = os.getenv('OPENAI_API_KEY')
-            st.write(f"Key format: {key[:7]}...{key[-4:] if len(key) > 10 else ''}")
-            st.write(f"Key length: {len(key)} chars")
+# Display Railway environment info
+if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+    print("Running on Railway environment")
+    with st.sidebar:
+        st.info("🚂 Running on Railway")
+        with st.expander("Environment Info"):
+            st.code(f"""
+Railway Environment: {os.getenv('RAILWAY_ENVIRONMENT', 'Detected')}
+Project ID: {os.getenv('RAILWAY_PROJECT_ID', 'N/A')}
+Service ID: {os.getenv('RAILWAY_SERVICE_ID', 'N/A')}
+API Key Present: {bool(os.getenv('OPENAI_API_KEY'))}
+            """)
 
-# Initialize OpenAI client with improved error handling
+# Initialize OpenAI client with Railway-optimized error handling
+print("Initializing OpenAI client...")
 try:
     client = get_openai_client()
-    api_status = "ready"
+    print("OpenAI client initialized successfully")
 except:
+    print("Failed to initialize OpenAI client")
     client = None
-    api_status = "error"
 
 # Initialize persistent ChromaDB
+print("Initializing ChromaDB client...")
 ch_client = get_chroma_client()
 if not ch_client:
-    st.error("Failed to initialize database. The app may not function properly.")
+    st.error("Failed to initialize database. Please check your setup.")
     st.stop()
 
 # Session state
@@ -703,12 +761,18 @@ with col1:
     st.markdown("### Upload your files")
     st.markdown("Drag & drop or click to browse")
     
+    # Show API status
+    if not client:
+        st.error("⚠️ OpenAI API not available. File processing disabled.")
+        st.markdown("Please check your OPENAI_API_KEY environment variable.")
+    
     # File uploader with custom styling
     uploaded_files = st.file_uploader(
         "",
         type=["pdf", "csv", "xlsx", "xls", "txt", "doc", "docx"],
         accept_multiple_files=True,
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        disabled=(client is None)
     )
     
     st.markdown("**Supports:** .txt, .doc, .docx, .xls, .xlsx, .csv, .pdf")
@@ -735,6 +799,8 @@ with col1:
     # Process button
     if uploaded_files and client:
         if st.button("🚀 Process Files"):
+            print(f"Processing {len(uploaded_files)} files...")
+            
             tokenizer = make_tokenizer()
             rag_chunks: List[RAGChunk] = []
             
@@ -743,6 +809,7 @@ with col1:
                 
                 for file_idx, file in enumerate(uploaded_files, 1):
                     st.write(f"Reading **{file.name}** ({file_idx}/{total_files})...")
+                    print(f"Processing file {file_idx}/{total_files}: {file.name}")
                     
                     try:
                         # Check if file already exists in collection
@@ -751,6 +818,7 @@ with col1:
                         
                         if file_already_exists:
                             st.info(f"📁 {file.name} already in database, skipping...")
+                            print(f"File {file.name} already exists, skipping...")
                             continue
                         
                         # Process different file types
@@ -768,82 +836,11 @@ with col1:
                                 content = str(file.read(), "utf-8", errors='ignore')
                                 if content.strip():
                                     units = [(content, {"source": file.name, "type": file_ext, "page": 1})]
-                            except Exception as e:
-                                st.warning(f"Could not read {file.name}: {e}")
+                            except Exception as txt_error:
+                                print(f"Error reading text file {file.name}: {txt_error}")
+                                st.warning(f"Could not read {file.name}: {txt_error}")
                                 continue
                         
                         if not units:
-                            st.warning(f"No content extracted from {file.name}")
-                            continue
-                            
-                        st.write(f"Extracted {len(units)} units from {file.name}")
-                        
-                        # Chunk each unit
-                        for unit_idx, (unit_text, meta) in enumerate(units):
-                            unit_text = safe_clean(unit_text)
-                            if not unit_text:
-                                continue
-                            
-                            chunks = chunk_text(unit_text, tokenizer)
-                            
-                            for chunk_idx, ch in enumerate(chunks):
-                                if ch.strip():
-                                    chunk_meta = meta.copy()
-                                    chunk_meta["chunk_id"] = chunk_idx + 1
-                                    rag_chunks.append(RAGChunk(id=new_uuid(), text=ch, metadata=chunk_meta))
-                    
-                    except Exception as e:
-                        st.error(f"Failed to read {file.name}: {e}")
-                        continue
-                
-                if rag_chunks:
-                    st.write(f"Adding {len(rag_chunks)} new chunks to permanent database...")
-                    success = add_chunks_to_collection(st.session_state.collection, client, rag_chunks)
-                    
-                    if success:
-                        status.update(label="✅ Files processed and permanently stored", state="complete")
-                        st.rerun()  # Refresh to show new files
-                    else:
-                        status.update(label="❌ Failed to process files", state="error")
-                else:
-                    status.update(label="ℹ️ No new content to add", state="complete")
-    
-    elif uploaded_files and not client:
-        st.error("Cannot process files: OpenAI API client not available. Please check your API key configuration.")
-    
-    # Show permanently stored files
-    st.markdown("---")
-    st.markdown("### Uploaded Files")
-    
-    uploaded_files_list = get_uploaded_files_from_collection(st.session_state.collection)
-    
-    if uploaded_files_list:
-        st.markdown(f"**{len(uploaded_files_list)} file(s) in database:**")
-        for filename, filetype in uploaded_files_list:
-            file_icon = {
-                "pdf": "📄", "csv": "📊", "xlsx": "📊", "xls": "📊", 
-                "txt": "📝", "doc": "📝", "docx": "📝"
-            }.get(filetype, "📎")
-            
-            st.markdown(
-                f"""
-                <div class="file-item">
-                    <span class="file-icon">{file_icon}</span>
-                    <span>{filename}</span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-    else:
-        st.info("No files uploaded yet")
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# Right column - Chat Interface
-with col2:
-    st.markdown('<div class="chat-section">', unsafe_allow_html=True)
-    
-    # Chat header
-    st.markdown('<div class="chat-header">', unsafe_allow_html=True)
-    st.markdown("### Chat with K&B Scout AI")
-    st.markdown("Ask questions about your uploaded documents
+                            print(f"No content extracted from {file.name}")
+                            st.warning(f"No content extracted from {file.name
