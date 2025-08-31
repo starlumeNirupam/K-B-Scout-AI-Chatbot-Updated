@@ -51,6 +51,7 @@ load_dotenv()
 
 def get_openai_client() -> OpenAI:
     key = os.getenv("OPENAI_API_KEY")
+    print("key",key)
     if not key:
         st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your .env file.")
         st.stop()
