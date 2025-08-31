@@ -50,6 +50,7 @@ load_dotenv()
 # -----------------------------
 
 def get_openai_client() -> OpenAI:
+    load_dotenv(override=True)
     key = os.getenv("OPENAI_API_KEY")
     print("key",key)
     if not key:
