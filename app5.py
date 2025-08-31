@@ -843,4 +843,244 @@ with col1:
                         
                         if not units:
                             print(f"No content extracted from {file.name}")
-                            st.warning(f"No content extracted from {file.name
+                            st.warning(f"No content extracted from {file.name}")
+                            continue
+                            
+                        st.write(f"Extracted {len(units)} units from {file.name}")
+                        print(f"Extracted {len(units)} units from {file.name}")
+                        
+                        # Chunk each unit
+                        for unit_idx, (unit_text, meta) in enumerate(units):
+                            unit_text = safe_clean(unit_text)
+                            if not unit_text:
+                                continue
+                            
+                            chunks = chunk_text(unit_text, tokenizer)
+                            
+                            for chunk_idx, ch in enumerate(chunks):
+                                if ch.strip():
+                                    chunk_meta = meta.copy()
+                                    chunk_meta["chunk_id"] = chunk_idx + 1
+                                    rag_chunks.append(RAGChunk(id=new_uuid(), text=ch, metadata=chunk_meta))
+                    
+                    except Exception as e:
+                        print(f"Failed to read {file.name}: {e}")
+                        st.error(f"Failed to read {file.name}: {e}")
+                        continue
+                
+                if rag_chunks:
+                    st.write(f"Adding {len(rag_chunks)} new chunks to permanent database...")
+                    print(f"Adding {len(rag_chunks)} chunks to database...")
+                    
+                    success = add_chunks_to_collection(st.session_state.collection, client, rag_chunks)
+                    
+                    if success:
+                        status.update(label="✅ Files processed and permanently stored", state="complete")
+                        print("Files processed successfully")
+                        st.rerun()  # Refresh to show new files
+                    else:
+                        status.update(label="❌ Failed to process files", state="error")
+                        print("Failed to process files")
+                else:
+                    status.update(label="ℹ️ No new content to add", state="complete")
+                    print("No new content to add")
+    
+    elif uploaded_files and not client:
+        st.error("Cannot process files: OpenAI API client not available.")
+    
+    # Show permanently stored files
+    st.markdown("---")
+    st.markdown("### Uploaded Files")
+    
+    uploaded_files_list = get_uploaded_files_from_collection(st.session_state.collection)
+    
+    if uploaded_files_list:
+        st.markdown(f"**{len(uploaded_files_list)} file(s) in database:**")
+        for filename, filetype in uploaded_files_list:
+            file_icon = {
+                "pdf": "📄", "csv": "📊", "xlsx": "📊", "xls": "📊", 
+                "txt": "📝", "doc": "📝", "docx": "📝"
+            }.get(filetype, "📎")
+            
+            st.markdown(
+                f"""
+                <div class="file-item">
+                    <span class="file-icon">{file_icon}</span>
+                    <span>{filename}</span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+    else:
+        st.info("No files uploaded yet")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# Right column - Chat Interface
+with col2:
+    st.markdown('<div class="chat-section">', unsafe_allow_html=True)
+    
+    # Chat header
+    st.markdown('<div class="chat-header">', unsafe_allow_html=True)
+    st.markdown("### Chat with K&B Scout AI")
+    st.markdown("Ask questions about your uploaded documents")
+    
+    # Status indicator
+    if st.session_state.collection and client:
+        try:
+            count = st.session_state.collection.count()
+            if count > 0:
+                st.markdown(
+                    f"""
+                    <div class="status-indicator status-ready">
+                        🟢 Ready • {count} documents indexed
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    """
+                    <div class="status-indicator status-waiting">
+                        🟡 Upload files to get started
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+        except:
+            st.markdown(
+                """
+                <div class="status-indicator status-waiting">
+                    🟡 Database not ready
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+    elif not client:
+        st.markdown(
+            """
+            <div class="status-indicator status-error">
+                🔴 API not available
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Initial greeting
+    if not st.session_state.history:
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown("👋 Hello! I'm **K&B Scout AI**, your enterprise document assistant.")
+            if client:
+                st.markdown("I can help you find information from your uploaded files. What would you like to know?")
+            else:
+                st.markdown("⚠️ OpenAI API is not available. Please check your environment configuration.")
+    
+    # Chat history
+    for msg in st.session_state.history:
+        avatar = "🤖" if msg["role"] == "assistant" else "👤"
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"])
+
+    # Chat input
+    prompt = st.chat_input(
+        "Ask K&B Scout AI about your documents..." if client else "API not available - check configuration",
+        disabled=(not client)
+    )
+    
+    if prompt and client:
+        print(f"User query: {prompt}")
+        
+        # Check if we have any documents
+        if not st.session_state.collection:
+            st.warning("Database not initialized. Please refresh the page.")
+        else:
+            try:
+                doc_count = st.session_state.collection.count()
+                print(f"Collection has {doc_count} documents")
+                
+                if doc_count == 0:
+                    # Show message even without documents
+                    st.session_state.history.append({"role": "user", "content": prompt})
+                    with st.chat_message("user", avatar="👤"):
+                        st.markdown(prompt)
+                    
+                    with st.chat_message("assistant", avatar="🤖"):
+                        response = "I'd be happy to help, but I don't have any documents to search through yet. Please upload some files first, and then I can answer questions about their content!"
+                        st.markdown(response)
+                        st.session_state.history.append({"role": "assistant", "content": response})
+                else:
+                    # Process question with RAG
+                    st.session_state.history.append({"role": "user", "content": prompt})
+                    with st.chat_message("user", avatar="👤"):
+                        st.markdown(prompt)
+
+                    with st.chat_message("assistant", avatar="🤖"):
+                        placeholder = st.empty()
+                        
+                        # Retrieve relevant documents
+                        retrieved = retrieve(st.session_state.collection, client, prompt)
+                        
+                        if not retrieved:
+                            answer = "I couldn't find any relevant information in your uploaded documents for this question."
+                            placeholder.markdown(answer)
+                            st.session_state.history.append({"role": "assistant", "content": answer})
+                        else:
+                            context_text = format_context(retrieved)
+                            
+                            # Stream response
+                            try:
+                                stream = answer_with_rag(client, prompt, context_text)
+                                if stream:
+                                    answer_accum = ""
+                                    for chunk in stream:
+                                        delta = chunk.choices[0].delta.content or ""
+                                        answer_accum += delta
+                                        placeholder.markdown(answer_accum)
+                                    st.session_state.history.append({"role": "assistant", "content": answer_accum})
+                                else:
+                                    placeholder.markdown("Sorry, I couldn't generate a response right now.")
+                            except Exception as e:
+                                print(f"Error generating response: {e}")
+                                st.error(f"Error generating response: {e}")
+            except Exception as e:
+                print(f"Error processing question: {e}")
+                st.error(f"Error processing question: {e}")
+
+    # Chat controls at bottom
+    if st.session_state.history:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🔄 Clear Chat"):
+                st.session_state.history = []
+                st.rerun()
+        with col_b:
+            if st.button("🗑️ Clear All Data"):
+                if st.session_state.collection:
+                    try:
+                        ch_client.delete_collection(name="kb_scout_documents")
+                        st.session_state.collection = get_or_create_collection(ch_client, "kb_scout_documents")
+                        st.session_state.history = []
+                        st.success("All data cleared successfully!")
+                        print("All data cleared")
+                        st.rerun()
+                    except Exception as e:
+                        print(f"Error clearing data: {e}")
+                        st.error(f"Error clearing data: {e}")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Footer
+st.markdown("---")
+st.markdown(
+    """
+    <div style="text-align: center; color: #6c757d; font-size: 12px; padding: 10px;">
+        💡 <strong>Tip:</strong> Upload your documents on the left, then ask questions about them on the right!<br>
+        Your files are stored in database and will be available during this session.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
