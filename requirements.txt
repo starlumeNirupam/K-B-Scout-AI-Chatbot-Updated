@@ -241,5 +241,6 @@ zipp==3.23.0
 streamlit==1.37.1
 chromadb==0.5.5
 pysqlite3-binary==0.5.3
+sqlite3==3.43.1
 
 
