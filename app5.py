@@ -1,21 +1,3 @@
-import sys
-import importlib
-
-try:
-    import pysqlite3  # installed via pysqlite3-binary
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except Exception:
-    # fallback: if not installed or something odd, try to import sqlite3 anyway
-    pass
-
-# (optional) sanity check: print the sqlite version to logs
-try:
-    import sqlite3
-    print("SQLite version:", sqlite3.sqlite_version)
-except Exception:
-    pass
-# ----------------------------------------------------------------
-
 import os
 import uuid
 from typing import List, Dict, Tuple
@@ -34,14 +16,15 @@ from pypdf import PdfReader
 # Vector DB
 import chromadb
 from chromadb.config import Settings
+from chromadb.utils import embedding_functions
 
 # Tokenization & chunking
 import tiktoken
 
-# OpenAI SDK v1
+# OpenAI SDK v1 (only for chat completions now)
 from openai import OpenAI
 
-# Load environment variables - Railway modification
+# Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -50,74 +33,23 @@ load_dotenv()
 # -----------------------------
 
 def get_openai_client() -> OpenAI:
-    """Get OpenAI client with Railway-compatible key loading."""
-    # Try multiple ways to get the API key for Railway compatibility
-    key = None
-    
-    # Method 1: Direct environment variable (Railway sets this directly)
-    key = os.environ.get("OPENAI_API_KEY")
-    
-    # Method 2: Try getenv as fallback
+    key = os.getenv("OPENAI_API_KEY")
     if not key:
-        key = os.getenv("OPENAI_API_KEY")
-    
-    # Method 3: Try streamlit secrets (if using secrets.toml)
-    if not key:
-        try:
-            key = st.secrets.get("OPENAI_API_KEY")
-        except:
-            pass
-    
-    # Debug logging for Railway (will show in Railway logs)
-    if key:
-        print(f"✅ OpenAI API key found (length: {len(key)}, starts with: {key[:7]}...)")
-    else:
-        print("❌ No OpenAI API key found in any location")
-        print("Available environment variables:")
-        for k, v in os.environ.items():
-            if 'OPENAI' in k.upper() or 'API' in k.upper():
-                print(f"  {k}: {'SET' if v else 'NOT SET'}")
-    
-    if not key or not key.strip():
-        st.error("""
-        🔑 **OpenAI API Key Missing**
-        
-        Please set your OpenAI API key in Railway:
-        1. Go to your Railway project dashboard
-        2. Click on "Variables" tab
-        3. Add: `OPENAI_API_KEY` = `your_actual_api_key_here`
-        4. Redeploy your application
-        
-        Make sure your API key:
-        - Starts with 'sk-'
-        - Has sufficient credits
-        - Has the correct permissions
-        """)
+        st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your .env file.")
+        st.stop()
+    return OpenAI(api_key=key)
+
+def get_openai_embedding_function():
+    """Create OpenAI embedding function using ChromaDB's embedding functions."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your .env file.")
         st.stop()
     
-    # Validate API key format
-    if not key.startswith('sk-'):
-        st.error(f"❌ Invalid API key format. Key should start with 'sk-' but starts with '{key[:10]}...'")
-        st.stop()
-    
-    try:
-        client = OpenAI(api_key=key.strip())
-        # Test the client with a simple API call
-        test_response = client.models.list()
-        print("✅ OpenAI client initialized successfully")
-        return client
-    except Exception as e:
-        st.error(f"""
-        🔌 **OpenAI Connection Error**
-        
-        Failed to initialize OpenAI client: {str(e)}
-        
-        Common fixes:
-        - Verify your API key is correct
-        - Check if you have credits remaining
-        - Ensure the key has proper permissions
-        """)
-        st.stop()
+    return embedding_functions.OpenAIEmbeddingFunction(
+        api_key=api_key,
+        model_name="text-embedding-3-small"
+    )
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
@@ -151,39 +83,25 @@ def chunk_text(
     return chunks
 
 def read_pdf(file) -> list[tuple[str, dict]]:
-    """Extract text from a PDF with OCR fallback - Railway compatible."""
-    try:
-        reader = PdfReader(file)
-        pages = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                pages.append((text, {"source": file.name, "type": "pdf", "page": i+1}))
-            else:
-                # OCR fallback - may not work on Railway due to system dependencies
-                try:
-                    # Save uploaded file temporarily for pdf2image
-                    temp_path = f"/tmp/{file.name}"
-                    with open(temp_path, "wb") as f:
-                        f.write(file.getbuffer())
-                    
-                    images = convert_from_path(temp_path, first_page=i+1, last_page=i+1, dpi=200)
-                    ocr_text = ""
-                    for img in images:
-                        ocr_text += pytesseract.image_to_string(img)
-                    pages.append((ocr_text, {"source": file.name, "type": "pdf", "page": i+1}))
-                    
-                    # Cleanup
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except Exception as ocr_e:
-                    print(f"OCR failed for page {i+1}: {ocr_e}")
-                    # Add empty page if OCR fails
-                    pages.append(("", {"source": file.name, "type": "pdf", "page": i+1}))
-        return pages
-    except Exception as e:
-        st.error(f"Error reading PDF {file.name}: {e}")
-        return []
+    """Extract text from a PDF with OCR fallback."""
+    reader = PdfReader(file)
+    pages = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        if text.strip():
+            pages.append((text, {"source": file.name, "type": "pdf", "page": i+1}))
+        else:
+            # OCR fallback
+            try:
+                images = convert_from_path(file.name, first_page=i+1, last_page=i+1, dpi=300)
+                ocr_text = ""
+                for img in images:
+                    ocr_text += pytesseract.image_to_string(img)
+                pages.append((ocr_text, {"source": file.name, "type": "pdf", "page": i+1}))
+            except:
+                # If OCR fails, add empty page
+                pages.append(("", {"source": file.name, "type": "pdf", "page": i+1}))
+    return pages
 
 def read_csv(file) -> List[Tuple[str, Dict]]:
     """Returns (row_text, metadata) per row."""
@@ -242,93 +160,58 @@ class RAGChunk:
 # -----------------------------
 
 def get_chroma_client():
-    """Creates a persistent ChromaDB client - Railway compatible."""
-    # Use /tmp for Railway compatibility (ephemeral but works)
-    persist_dir = "/tmp/chromadb_storage"
-    
-    # Also try current directory as fallback
-    fallback_dir = "./chromadb_storage"
-    
+    """Creates a persistent ChromaDB client."""
+    persist_dir = "./chromadb_storage"
     try:
-        # Try /tmp first (works better on Railway)
         os.makedirs(persist_dir, exist_ok=True)
         client = chromadb.PersistentClient(path=persist_dir)
-        print(f"✅ ChromaDB initialized at: {persist_dir}")
         return client
     except Exception as e:
-        print(f"Failed to create persistent client at {persist_dir}: {e}")
-        try:
-            # Fallback to current directory
-            os.makedirs(fallback_dir, exist_ok=True)
-            client = chromadb.PersistentClient(path=fallback_dir)
-            print(f"✅ ChromaDB initialized at: {fallback_dir}")
-            return client
-        except Exception as e2:
-            print(f"Failed to create persistent client at {fallback_dir}: {e2}")
-            # Last resort: in-memory client (will lose data on restart)
-            try:
-                client = chromadb.Client()
-                print("⚠️ Using in-memory ChromaDB (data will be lost on restart)")
-                return client
-            except Exception as e3:
-                st.error(f"Could not create any ChromaDB client: {e3}")
-                return None
+        st.error(f"Could not create persistent client: {e}")
+        return None
 
 def get_or_create_collection(chroma_client, collection_name: str = "kb_scout_documents"):
-    """Get existing collection or create new one."""
-    if not chroma_client:
-        return None
-        
+    """Get existing collection or create new one with OpenAI embedding function."""
+    embedding_function = get_openai_embedding_function()
+    
     try:
         # Try to get existing collection first
-        collection = chroma_client.get_collection(name=collection_name)
-        print(f"✅ Retrieved existing collection: {collection_name}")
+        collection = chroma_client.get_collection(
+            name=collection_name, 
+            embedding_function=embedding_function
+        )
         return collection
-    except:
-        # Create new collection if it doesn't exist
+    except ValueError:
+        # Collection doesn't exist, create it
         try:
-            collection = chroma_client.create_collection(
+            return chroma_client.create_collection(
                 name=collection_name,
+                embedding_function=embedding_function,
                 metadata={"hnsw:space": "cosine"}
             )
-            print(f"✅ Created new collection: {collection_name}")
-            return collection
         except Exception as e:
-            st.error(f"Error creating collection: {e}")
-            return None
+            # If creation fails due to existing collection, try to delete and recreate
+            if "already exists" in str(e).lower():
+                try:
+                    st.info("Existing collection found. Updating to use new embedding function...")
+                    chroma_client.delete_collection(name=collection_name)
+                    return chroma_client.create_collection(
+                        name=collection_name,
+                        embedding_function=embedding_function,
+                        metadata={"hnsw:space": "cosine"}
+                    )
+                except Exception as e2:
+                    st.error(f"Error recreating collection: {e2}")
+                    return None
+            else:
+                st.error(f"Error creating collection: {e}")
+                return None
+    except Exception as e:
+        st.error(f"Unexpected error accessing collection: {e}")
+        return None
 
-def embed_texts(client: OpenAI, texts: List[str], model: str = "text-embedding-3-small", batch_size: int = 50) -> List[List[float]]:
-    """Batches embeddings to avoid hitting request-size limits - Railway optimized."""
-    if not texts:
-        return []
-    
-    # Smaller batch size for Railway to avoid timeouts
-    all_embeddings: List[List[float]] = []
-    total_batches = (len(texts) + batch_size - 1) // batch_size
-    
-    for i in range(0, len(texts), batch_size):
-        batch_num = (i // batch_size) + 1
-        st.write(f"Processing embedding batch {batch_num}/{total_batches}...")
-        
-        batch = texts[i:i + batch_size]
-        try:
-            resp = client.embeddings.create(
-                input=batch, 
-                model=model,
-                timeout=30  # Add timeout for Railway
-            )
-            batch_embeddings = [d.embedding for d in resp.data]
-            all_embeddings.extend(batch_embeddings)
-            print(f"✅ Processed batch {batch_num}/{total_batches}")
-        except Exception as e:
-            print(f"❌ Error creating embeddings for batch {batch_num}: {e}")
-            st.error(f"Error creating embeddings for batch {batch_num}: {e}")
-            return []
-    
-    return all_embeddings
-
-def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChunk]):
-    """Add chunks to persistent collection."""
+def add_chunks_to_collection(collection, rag_chunks: List[RAGChunk]):
+    """Add chunks to persistent collection. ChromaDB will handle embeddings automatically."""
     if not rag_chunks or not collection:
         return False
     
@@ -336,41 +219,38 @@ def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChu
     if not valid_chunks:
         return False
     
+    st.write(f"Adding {len(valid_chunks)} chunks to collection...")
+    
     documents = [c.text for c in valid_chunks]
     metadatas = [c.metadata for c in valid_chunks]
     ids = [c.id for c in valid_chunks]
 
-    embeddings = embed_texts(client, documents)
-    
-    if not embeddings or len(embeddings) != len(documents):
-        return False
-
     try:
+        # ChromaDB will automatically generate embeddings using the embedding function
         collection.add(
             documents=documents,
             metadatas=metadatas,
-            ids=ids,
-            embeddings=embeddings
+            ids=ids
+            # No need to pass embeddings - ChromaDB handles this automatically
         )
-        print(f"✅ Added {len(valid_chunks)} chunks to collection")
         return True
     except Exception as e:
-        print(f"❌ Error adding to collection: {e}")
         st.error(f"Error adding to collection: {e}")
         return False
 
-def retrieve(collection, client: OpenAI, query: str, top_k: int = 6) -> List[Tuple[str, Dict, float]]:
+def retrieve(collection, query: str, top_k: int = 6) -> List[Tuple[str, Dict, float]]:
+    """Retrieve similar documents. ChromaDB will handle query embedding automatically."""
     if not collection:
         return []
     
+    count = collection.count()
+    if count == 0:
+        return []
+    
     try:
-        count = collection.count()
-        if count == 0:
-            return []
-        
-        q_emb = embed_texts(client, [query])[0]
+        # ChromaDB will automatically embed the query using the collection's embedding function
         res = collection.query(
-            query_embeddings=[q_emb],
+            query_texts=[query],  # Changed from query_embeddings to query_texts
             n_results=min(top_k, count),
             include=["documents", "metadatas", "distances"]
         )
@@ -382,7 +262,6 @@ def retrieve(collection, client: OpenAI, query: str, top_k: int = 6) -> List[Tup
         scored.sort(key=lambda x: x[2])
         return scored
     except Exception as e:
-        print(f"❌ Error during retrieval: {e}")
         st.error(f"Error during retrieval: {e}")
         return []
 
@@ -413,8 +292,7 @@ def get_uploaded_files_from_collection(collection):
                 files.add((meta["source"], meta["type"]))
         
         return list(files)
-    except Exception as e:
-        print(f"Error getting uploaded files: {e}")
+    except:
         return []
 
 SYSTEM_PROMPT = """You are K&B Scout AI, a helpful enterprise document assistant.
@@ -438,27 +316,19 @@ def answer_with_rag(client: OpenAI, question: str, context_text: str):
         model="gpt-4o-mini",
         messages=messages,
         temperature=0.0,
-        stream=True,
-        timeout=30  # Add timeout for Railway
+        stream=True
     )
 
 # -----------------------------
 # --------- UI Layer ----------
 # -----------------------------
 
-# Railway-specific configuration
 st.set_page_config(
     page_title="K&B Scout AI Enterprise Assistant", 
     page_icon="🤖", 
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-
-# Display Railway environment info (for debugging)
-if os.environ.get('RAILWAY_ENVIRONMENT'):
-    print("🚂 Running on Railway")
-    print(f"Environment: {os.environ.get('RAILWAY_ENVIRONMENT')}")
-    print(f"Service: {os.environ.get('RAILWAY_SERVICE_NAME', 'Unknown')}")
 
 # Custom CSS matching the design
 st.markdown(
@@ -491,7 +361,7 @@ st.markdown(
             margin: 0;
             padding: 0;
             overflow: hidden;
-            min-height: 10vh;
+            min-height: 100vh;
         }
         
         /* Header styling */
@@ -644,12 +514,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize OpenAI client with better error handling
-try:
-    client = get_openai_client()
-except Exception as e:
-    st.error(f"Failed to initialize OpenAI client: {e}")
-    st.stop()
+# Initialize OpenAI client (only for chat completions now)
+client = get_openai_client()
 
 # Initialize persistent ChromaDB
 ch_client = get_chroma_client()
@@ -667,17 +533,13 @@ if "collection" not in st.session_state:
 # Main container
 st.markdown('<div class="main-container">', unsafe_allow_html=True)
 
-# Header with Railway indicator
-railway_indicator = ""
-if os.environ.get('RAILWAY_ENVIRONMENT'):
-    railway_indicator = " 🚂"
-
+# Header
 st.markdown(
-    f"""
+    """
     <div class="app-header">
         <div style="font-size: 28px;">🤖</div>
         <div>
-            <div class="app-title">K&B Scout AI{railway_indicator}</div>
+            <div class="app-title">K&B Scout AI</div>
             <div class="app-subtitle">Enterprise Assistant</div>
         </div>
     </div>
@@ -698,12 +560,12 @@ with col1:
     # File uploader with custom styling
     uploaded_files = st.file_uploader(
         "",
-        type=["pdf", "csv", "xlsx", "xls", "txt"],  # Removed doc/docx for Railway compatibility
+        type=["pdf", "csv", "xlsx", "xls", "txt", "doc", "docx"],
         accept_multiple_files=True,
         label_visibility="collapsed"
     )
     
-    st.markdown("**Supports:** .txt, .csv, .xlsx, .xls, .pdf")
+    st.markdown("**Supports:** .txt, .doc, .docx, .xls, .xlsx, .csv, .pdf")
     
     # Show uploaded files count
     if uploaded_files:
@@ -711,7 +573,7 @@ with col1:
         for file in uploaded_files:
             file_type_icon = {
                 "pdf": "📄", "csv": "📊", "xlsx": "📊", "xls": "📊", 
-                "txt": "📝"
+                "txt": "📝", "doc": "📝", "docx": "📝"
             }.get(file.name.split('.')[-1].lower(), "📎")
             
             st.markdown(
@@ -752,7 +614,7 @@ with col1:
                         elif file.name.lower().endswith((".xlsx", ".xls")):
                             units = read_xlsx(file)
                         else:
-                            # Handle txt files
+                            # Handle txt, doc, docx files
                             content = str(file.read(), "utf-8")
                             units = [(content, {"source": file.name, "type": "txt", "page": 1})]
                         
@@ -774,15 +636,15 @@ with col1:
                     
                     except Exception as e:
                         st.error(f"Failed to read {file.name}: {e}")
-                        print(f"❌ Failed to read {file.name}: {e}")
                         continue
                 
                 if rag_chunks:
-                    st.write(f"Adding {len(rag_chunks)} new chunks to database...")
-                    success = add_chunks_to_collection(st.session_state.collection, client, rag_chunks)
+                    st.write(f"Processing {len(rag_chunks)} chunks...")
+                    st.write("ChromaDB will automatically generate embeddings using OpenAI...")
+                    success = add_chunks_to_collection(st.session_state.collection, rag_chunks)
                     
                     if success:
-                        status.update(label="✅ Files processed and stored", state="complete")
+                        status.update(label="✅ Files processed and permanently stored", state="complete")
                         st.rerun()  # Refresh to show new files
                     else:
                         status.update(label="❌ Failed to process files", state="error")
@@ -800,7 +662,7 @@ with col1:
         for filename, filetype in uploaded_files_list:
             file_icon = {
                 "pdf": "📄", "csv": "📊", "xlsx": "📊", "xls": "📊", 
-                "txt": "📝"
+                "txt": "📝", "doc": "📝", "docx": "📝"
             }.get(filetype, "📎")
             
             st.markdown(
@@ -901,8 +763,8 @@ with col2:
                     with st.chat_message("assistant", avatar="🤖"):
                         placeholder = st.empty()
                         
-                        # Retrieve relevant documents
-                        retrieved = retrieve(st.session_state.collection, client, prompt)
+                        # Retrieve relevant documents (ChromaDB will handle query embedding)
+                        retrieved = retrieve(st.session_state.collection, prompt)
                         
                         if not retrieved:
                             answer = "I couldn't find any relevant information in your uploaded documents for this question."
@@ -921,13 +783,9 @@ with col2:
                                     placeholder.markdown(answer_accum)
                                 st.session_state.history.append({"role": "assistant", "content": answer_accum})
                             except Exception as e:
-                                error_msg = f"Error generating response: {e}"
-                                placeholder.markdown(error_msg)
-                                st.session_state.history.append({"role": "assistant", "content": error_msg})
-                                print(f"❌ {error_msg}")
+                                st.error(f"Error generating response: {e}")
             except Exception as e:
                 st.error(f"Error processing question: {e}")
-                print(f"❌ Error processing question: {e}")
 
     # Chat controls at bottom
     if st.session_state.history:
@@ -947,23 +805,18 @@ with col2:
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error clearing data: {e}")
-                        print(f"❌ Error clearing data: {e}")
     
     st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Footer with Railway info
-railway_info = ""
-if os.environ.get('RAILWAY_ENVIRONMENT'):
-    railway_info = "<br>🚂 Deployed on Railway"
-
+# Footer
 st.markdown("---")
 st.markdown(
-    f"""
+    """
     <div style="text-align: center; color: #6c757d; font-size: 12px; padding: 10px;">
         💡 <strong>Tip:</strong> Upload your documents on the left, then ask questions about them on the right!<br>
-        Your files are stored in the session and may persist between deployments.{railway_info}
+        Your files are permanently stored and will be available in future sessions.
     </div>
     """,
     unsafe_allow_html=True
