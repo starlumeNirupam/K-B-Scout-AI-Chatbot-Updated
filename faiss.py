@@ -28,12 +28,14 @@ load_dotenv()
 # ---------- Utils ------------
 # -----------------------------
 
-def get_openai_client() -> OpenAI:
+def get_openai_client():
+    import openai
     key = os.getenv("OPENAI_API_KEY")
     if not key:
         st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your .env file.")
         st.stop()
-    return OpenAI(api_key=key)
+    openai.api_key = key
+    return openai
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
@@ -600,10 +602,14 @@ with col2:
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # Chat input
-    prompt = st.chat_input("Ask K&B Scout AI about your documents...")
-    
-    if prompt:
+    st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Chat input (must be outside columns)
+prompt = st.chat_input("Ask K&B Scout AI about your documents...")
+
+if prompt:
         if doc_count == 0:
             # Show message even without documents
             st.session_state.history.append({"role": "user", "content": prompt})
