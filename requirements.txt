@@ -240,4 +240,6 @@ websockets==15.0.1
 zipp==3.23.0
 streamlit==1.37.1
 chromadb==0.5.5
+pysqlite3-binary==0.5.3
+
 
