@@ -28,11 +28,21 @@ load_dotenv()
 # -----------------------------
 
 def get_openai_client() -> OpenAI:
-    key = os.getenv("OPENAI_API_KEY")
+    # Try multiple ways to get the API key
+    key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+    
     if not key:
-        st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your .env file.")
+        st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your environment variables or Streamlit secrets.")
         st.stop()
-    return OpenAI(api_key=key)
+    
+    # Clean the key (remove any whitespace)
+    key = key.strip()
+    
+    try:
+        return OpenAI(api_key=key)
+    except Exception as e:
+        st.error(f"Error initializing OpenAI client: {e}")
+        st.stop()
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
@@ -180,22 +190,37 @@ class SimpleVectorStore:
             st.error(f"Error adding documents: {e}")
             return False
     
-    def create_embeddings(self, client: OpenAI, texts: List[str], batch_size: int = 100):
-        """Create embeddings for texts"""
+    def create_embeddings(self, client: OpenAI, texts: List[str], batch_size: int = 50):
+        """Create embeddings for texts with better error handling"""
         all_embeddings = []
         
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
             try:
+                st.write(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+                
                 response = client.embeddings.create(
                     input=batch,
                     model="text-embedding-3-small"
                 )
                 batch_embeddings = [data.embedding for data in response.data]
                 all_embeddings.extend(batch_embeddings)
+                
             except Exception as e:
-                st.error(f"Error creating embeddings: {e}")
-                return []
+                st.error(f"Error creating embeddings for batch {i//batch_size + 1}: {e}")
+                st.write("Retrying with smaller batch...")
+                
+                # Try individual texts if batch fails
+                for text in batch:
+                    try:
+                        response = client.embeddings.create(
+                            input=[text],
+                            model="text-embedding-3-small"
+                        )
+                        all_embeddings.extend([data.embedding for data in response.data])
+                    except Exception as e2:
+                        st.error(f"Failed to create embedding for individual text: {e2}")
+                        return []
                 
         return all_embeddings
     
@@ -411,8 +436,29 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize OpenAI client
-client = get_openai_client()
+# Initialize OpenAI client with fallback
+@st.cache_resource
+def initialize_client():
+    # Try multiple ways to get the API key
+    key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+    
+    if not key:
+        st.warning("OpenAI API key not found in environment variables.")
+        key = st.text_input("Enter your OpenAI API key:", type="password", help="Get your API key from https://platform.openai.com/api-keys")
+        if not key:
+            st.stop()
+    
+    key = key.strip()
+    return get_openai_client_with_key(key)
+
+def get_openai_client_with_key(key: str) -> OpenAI:
+    try:
+        return OpenAI(api_key=key)
+    except Exception as e:
+        st.error(f"Error initializing OpenAI client: {e}")
+        st.stop()
+
+client = initialize_client()
 
 # Session state
 if "history" not in st.session_state:
