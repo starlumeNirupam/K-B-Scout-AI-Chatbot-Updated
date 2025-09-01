@@ -1,6 +1,5 @@
 import os
 import uuid
-import pickle
 import numpy as np
 from typing import List, Dict, Tuple
 from dataclasses import dataclass
@@ -28,14 +27,12 @@ load_dotenv()
 # ---------- Utils ------------
 # -----------------------------
 
-def get_openai_client():
-    import openai
+def get_openai_client() -> OpenAI:
     key = os.getenv("OPENAI_API_KEY")
     if not key:
         st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your .env file.")
         st.stop()
-    openai.api_key = key
-    return openai
+    return OpenAI(api_key=key)
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
@@ -604,12 +601,12 @@ with col2:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+# Close main container
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Chat input (must be outside columns)
+# Chat input (outside columns to avoid Streamlit restriction)
 prompt = st.chat_input("Ask K&B Scout AI about your documents...")
 
-if prompt:
 if prompt:
     doc_count = st.session_state.vector_store.count()
     if doc_count == 0:
@@ -622,6 +619,7 @@ if prompt:
             response = "I'd be happy to help, but I don't have any documents to search through yet. Please upload some files first, and then I can answer questions about their content!"
             st.markdown(response)
             st.session_state.history.append({"role": "assistant", "content": response})
+        st.rerun()
     else:
         # Process question with RAG
         st.session_state.history.append({"role": "user", "content": prompt})
@@ -652,8 +650,9 @@ if prompt:
                     st.session_state.history.append({"role": "assistant", "content": answer_accum})
                 except Exception as e:
                     st.error(f"Error generating response: {e}")
+        st.rerun()
 
-# Chat controls (also outside columns)
+# Chat controls
 if st.session_state.history:
     col_clear, col_reset = st.columns(2)
     with col_clear:
@@ -666,8 +665,6 @@ if st.session_state.history:
             st.session_state.history = []
             st.success("All data cleared successfully!")
             st.rerun()
-
-st.markdown('</div>', unsafe_allow_html=True)
 
 # Footer
 st.markdown("---")
