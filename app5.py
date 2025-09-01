@@ -41,116 +41,69 @@ import tiktoken
 # OpenAI SDK v1
 from openai import OpenAI
 
-# Load environment variables
+# Load environment variables (for local development)
 from dotenv import load_dotenv
-
-# Only load .env file if it exists (for local development)
-if os.path.exists('.env'):
-    load_dotenv()
+load_dotenv()
 
 # -----------------------------
 # ---------- Utils ------------
 # -----------------------------
 
+def get_openai_api_key():
+    """Get OpenAI API key from multiple sources (Streamlit secrets, environment variables)."""
+    api_key = None
+    
+    # Try Streamlit secrets first (for Streamlit Cloud)
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+        print("✅ API key loaded from Streamlit secrets")
+    except Exception as e:
+        print(f"❌ Could not load from Streamlit secrets: {e}")
+        pass
+    
+    # Fall back to environment variable (for Railway and local)
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            print("✅ API key loaded from environment variable")
+        else:
+            print("❌ No API key found in environment variables")
+    
+    return api_key
+
 def get_openai_client() -> OpenAI:
-    """Get OpenAI client with Railway environment support."""
+    """Create OpenAI client with proper error handling."""
+    api_key = get_openai_api_key()
     
-    # Multiple methods to get API key for Railway compatibility
-    key = None
-    
-    # Method 1: Direct environment variable (Railway's preferred method)
-    key = os.environ.get("OPENAI_API_KEY")
-    
-    # Method 2: Try os.getenv as fallback
-    if not key:
-        key = os.getenv("OPENAI_API_KEY")
-    
-    # Method 3: Force reload dotenv for local development
-    if not key and os.path.exists('.env'):
-        load_dotenv(override=True)
-        key = os.getenv("OPENAI_API_KEY")
-    
-    # Method 4: Alternative variable names
-    if not key:
-        key = os.environ.get("OPENAI_KEY") or os.environ.get("OPEN_AI_API_KEY")
-    
-    # Debug output for Railway (this will show in Railway logs)
-    print(f"API Key found: {bool(key)}")
-    if key:
-        print(f"API Key starts with: {key[:10]}...")
-        print(f"API Key length: {len(key)}")
-    else:
-        print("Available environment variables:")
-        env_keys = [k for k in os.environ.keys() if 'API' in k.upper() or 'OPENAI' in k.upper()]
-        print(f"API-related env vars: {env_keys}")
-        print("All environment variables:")
-        print(list(os.environ.keys()))
-    
-    if not key:
-        st.error("❌ No OpenAI API key found in environment variables.")
-        st.error("Please set OPENAI_API_KEY in your Railway service environment variables.")
-        
-        with st.expander("Debug Information"):
-            st.write("Railway Environment Variables Check:")
-            st.write(f"RAILWAY_ENVIRONMENT: {os.getenv('RAILWAY_ENVIRONMENT', 'Not detected')}")
-            st.write("Available environment variables containing 'API' or 'OPENAI':")
-            env_vars = [k for k in os.environ.keys() if 'API' in k.upper() or 'OPENAI' in k.upper()]
-            if env_vars:
-                st.write(env_vars)
-            else:
-                st.write("No API-related environment variables found")
-                st.write("This suggests the OPENAI_API_KEY environment variable is not set in Railway")
-        
+    if not api_key:
+        st.error("❌ **No OpenAI API key found!**")
+        st.error("Please configure your API key:")
+        st.code("""
+For Streamlit Cloud:
+1. Go to your app settings
+2. Add to Secrets (TOML format):
+   OPENAI_API_KEY = "your-key-here"
+
+For Railway:
+1. Go to your project dashboard
+2. Add environment variable:
+   OPENAI_API_KEY = your-key-here
+        """)
         st.stop()
     
     # Validate key format
-    if not key.startswith(('sk-', 'sk-proj-')):
-        st.error("❌ Invalid OpenAI API key format. Key should start with 'sk-' or 'sk-proj-'")
-        st.error(f"Current key starts with: {key[:10]}")
+    if not api_key.startswith(('sk-', 'sk-proj-')):
+        st.error("❌ **Invalid OpenAI API key format!**")
+        st.error("API key should start with 'sk-' or 'sk-proj-'")
         st.stop()
     
-    # Check key length
-    if len(key) < 40:
-        st.error("❌ OpenAI API key appears to be truncated or incomplete.")
-        st.error(f"Current key length: {len(key)} characters (should be 40+ characters)")
-        st.stop()
-    
-    # Test the API key with Railway-friendly timeout and retry
     try:
-        print("Testing OpenAI API connection...")
-        test_client = OpenAI(api_key=key, timeout=30.0)  # Railway-friendly timeout
-        
-        # Test API connection
-        test_response = test_client.models.list()
-        print("OpenAI API connection successful")
-        print(f"Number of models available: {len(test_response.data)}")
-        
-        return test_client
-        
+        client = OpenAI(api_key=api_key)
+        # Test the client with a minimal request
+        print(f"✅ OpenAI client created successfully")
+        return client
     except Exception as e:
-        error_msg = str(e)
-        print(f"OpenAI API test failed: {error_msg}")
-        
-        st.error(f"❌ OpenAI API key validation failed: {error_msg}")
-        
-        # Specific error handling
-        if "401" in error_msg or "Incorrect API key" in error_msg:
-            st.error("The API key is invalid or has been revoked. Please check your OpenAI account.")
-        elif "429" in error_msg:
-            st.error("Rate limit exceeded. Please try again later.")
-        elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
-            st.error("Network timeout or connection issue. This is common on Railway.")
-            st.info("Try redeploying your Railway service or check Railway's status page.")
-        else:
-            st.error("There might be a network connectivity issue.")
-        
-        with st.expander("Troubleshooting Steps"):
-            st.write("1. Verify your API key is correctly set in Railway service variables (not project variables)")
-            st.write("2. Ensure your OpenAI account has available credits")
-            st.write("3. Try redeploying your Railway service")
-            st.write("4. Check if Railway is experiencing network issues")
-            st.write("5. Verify the API key works in a local environment")
-        
+        st.error(f"❌ **Error creating OpenAI client:** {e}")
         st.stop()
 
 def new_uuid() -> str:
@@ -186,29 +139,24 @@ def chunk_text(
 
 def read_pdf(file) -> list[tuple[str, dict]]:
     """Extract text from a PDF with OCR fallback."""
-    try:
-        reader = PdfReader(file)
-        pages = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                pages.append((text, {"source": file.name, "type": "pdf", "page": i+1}))
-            else:
-                # OCR fallback (may not work on Railway due to system dependencies)
-                try:
-                    images = convert_from_path(file.name, first_page=i+1, last_page=i+1, dpi=300)
-                    ocr_text = ""
-                    for img in images:
-                        ocr_text += pytesseract.image_to_string(img)
-                    pages.append((ocr_text, {"source": file.name, "type": "pdf", "page": i+1}))
-                except Exception as ocr_error:
-                    print(f"OCR failed for page {i+1} of {file.name}: {ocr_error}")
-                    # If OCR fails, add empty page
-                    pages.append(("", {"source": file.name, "type": "pdf", "page": i+1}))
-        return pages
-    except Exception as e:
-        st.error(f"Error reading PDF {file.name}: {e}")
-        return []
+    reader = PdfReader(file)
+    pages = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        if text.strip():
+            pages.append((text, {"source": file.name, "type": "pdf", "page": i+1}))
+        else:
+            # OCR fallback
+            try:
+                images = convert_from_path(file.name, first_page=i+1, last_page=i+1, dpi=300)
+                ocr_text = ""
+                for img in images:
+                    ocr_text += pytesseract.image_to_string(img)
+                pages.append((ocr_text, {"source": file.name, "type": "pdf", "page": i+1}))
+            except:
+                # If OCR fails, add empty page
+                pages.append(("", {"source": file.name, "type": "pdf", "page": i+1}))
+    return pages
 
 def read_csv(file) -> List[Tuple[str, Dict]]:
     """Returns (row_text, metadata) per row."""
@@ -267,98 +215,56 @@ class RAGChunk:
 # -----------------------------
 
 def get_chroma_client():
-    """Creates a persistent ChromaDB client with Railway compatibility."""
-    # Use Railway-appropriate storage path
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-        persist_dir = "/tmp/chromadb_storage"  # Railway ephemeral storage
-        print("Using Railway ephemeral storage for ChromaDB")
-    else:
-        persist_dir = "./chromadb_storage"  # Local development
-        print("Using local storage for ChromaDB")
-    
+    """Creates a persistent ChromaDB client."""
+    persist_dir = "./chromadb_storage"
     try:
         os.makedirs(persist_dir, exist_ok=True)
         client = chromadb.PersistentClient(path=persist_dir)
-        print(f"ChromaDB client created successfully at {persist_dir}")
         return client
     except Exception as e:
-        print(f"Could not create persistent client: {e}")
         st.error(f"Could not create persistent client: {e}")
-        
-        # Fallback to in-memory client
-        try:
-            print("Falling back to in-memory ChromaDB client")
-            st.warning("Using in-memory database (data will not persist between deployments)")
-            return chromadb.Client()
-        except Exception as fallback_error:
-            print(f"Complete database initialization failed: {fallback_error}")
-            st.error(f"Complete database initialization failed: {fallback_error}")
-            return None
+        return None
 
 def get_or_create_collection(chroma_client, collection_name: str = "kb_scout_documents"):
     """Get existing collection or create new one."""
-    if not chroma_client:
-        return None
-        
     try:
         # Try to get existing collection first
         collection = chroma_client.get_collection(name=collection_name)
-        print(f"Using existing collection: {collection_name}")
         return collection
     except:
         # Create new collection if it doesn't exist
         try:
-            collection = chroma_client.create_collection(
+            return chroma_client.create_collection(
                 name=collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
-            print(f"Created new collection: {collection_name}")
-            return collection
         except Exception as e:
-            print(f"Error creating collection: {e}")
             st.error(f"Error creating collection: {e}")
             return None
 
-def embed_texts(client: OpenAI, texts: List[str], model: str = "text-embedding-3-small", batch_size: int = 50) -> List[List[float]]:
-    """Batches embeddings with Railway-friendly settings."""
+def embed_texts(client: OpenAI, texts: List[str], model: str = "text-embedding-3-small", batch_size: int = 100) -> List[List[float]]:
+    """Batches embeddings to avoid hitting request-size limits."""
     if not texts:
         return []
-    
-    print(f"Creating embeddings for {len(texts)} texts using {model}")
     
     all_embeddings: List[List[float]] = []
     total_batches = (len(texts) + batch_size - 1) // batch_size
     
-    # Progress tracking for Railway logs
     for i in range(0, len(texts), batch_size):
         batch_num = (i // batch_size) + 1
-        print(f"Processing embedding batch {batch_num}/{total_batches}...")
         st.write(f"Processing embedding batch {batch_num}/{total_batches}...")
         
         batch = texts[i:i + batch_size]
         try:
-            # Railway-friendly API call with timeout and retry logic
-            resp = client.embeddings.create(
-                input=batch, 
-                model=model,
-                timeout=60.0  # Increased timeout for Railway
-            )
+            resp = client.embeddings.create(input=batch, model=model)
             batch_embeddings = [d.embedding for d in resp.data]
             all_embeddings.extend(batch_embeddings)
-            print(f"Successfully processed batch {batch_num}")
-            
         except Exception as e:
-            print(f"Error creating embeddings for batch {batch_num}: {e}")
             st.error(f"Error creating embeddings for batch {batch_num}: {e}")
-            
-            if "timeout" in str(e).lower():
-                st.error("Network timeout occurred. Try uploading fewer files at once.")
-            elif "rate_limit" in str(e).lower() or "429" in str(e):
-                st.error("Rate limit hit. Please wait a moment and try again.")
-            
+            # Print more details about the error
+            st.error(f"Error details: {str(e)}")
             return []
     
-    print(f"Successfully created {len(all_embeddings)} embeddings")
     return all_embeddings
 
 def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChunk]):
@@ -370,8 +276,6 @@ def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChu
     if not valid_chunks:
         return False
     
-    print(f"Adding {len(valid_chunks)} chunks to collection")
-    
     documents = [c.text for c in valid_chunks]
     metadatas = [c.metadata for c in valid_chunks]
     ids = [c.id for c in valid_chunks]
@@ -379,7 +283,6 @@ def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChu
     embeddings = embed_texts(client, documents)
     
     if not embeddings or len(embeddings) != len(documents):
-        print("Failed to create embeddings or count mismatch")
         return False
 
     try:
@@ -389,10 +292,8 @@ def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChu
             ids=ids,
             embeddings=embeddings
         )
-        print("Successfully added chunks to collection")
         return True
     except Exception as e:
-        print(f"Error adding to collection: {e}")
         st.error(f"Error adding to collection: {e}")
         return False
 
@@ -400,38 +301,25 @@ def retrieve(collection, client: OpenAI, query: str, top_k: int = 6) -> List[Tup
     if not collection:
         return []
     
-    try:
-        count = collection.count()
-        print(f"Collection has {count} documents")
-        if count == 0:
-            return []
-    except Exception as e:
-        print(f"Error getting collection count: {e}")
+    count = collection.count()
+    if count == 0:
         return []
     
     try:
-        print(f"Creating query embedding for: {query[:100]}...")
         q_emb = embed_texts(client, [query])[0]
-        
-        print(f"Querying collection for top {min(top_k, count)} results...")
         res = collection.query(
             query_embeddings=[q_emb],
             n_results=min(top_k, count),
             include=["documents", "metadatas", "distances"]
         )
-        
         docs = res.get("documents", [[]])[0]
         metas = res.get("metadatas", [[]])[0]
         dists = res.get("distances", [[]])[0]
         
         scored = list(zip(docs, metas, dists))
         scored.sort(key=lambda x: x[2])
-        
-        print(f"Retrieved {len(scored)} relevant documents")
         return scored
-        
     except Exception as e:
-        print(f"Error during retrieval: {e}")
         st.error(f"Error during retrieval: {e}")
         return []
 
@@ -462,8 +350,7 @@ def get_uploaded_files_from_collection(collection):
                 files.add((meta["source"], meta["type"]))
         
         return list(files)
-    except Exception as e:
-        print(f"Error getting uploaded files list: {e}")
+    except:
         return []
 
 SYSTEM_PROMPT = """You are K&B Scout AI, a helpful enterprise document assistant.
@@ -475,8 +362,6 @@ Follow these rules:
 """
 
 def answer_with_rag(client: OpenAI, question: str, context_text: str):
-    print(f"Generating response for question: {question[:100]}...")
-    
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -485,18 +370,12 @@ def answer_with_rag(client: OpenAI, question: str, context_text: str):
         }
     ]
 
-    try:
-        return client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.0,
-            stream=True,
-            timeout=60.0  # Railway-friendly timeout
-        )
-    except Exception as e:
-        print(f"Error generating response: {e}")
-        st.error(f"Error generating response: {e}")
-        return None
+    return client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        temperature=0.0,
+        stream=True
+    )
 
 # -----------------------------
 # --------- UI Layer ----------
@@ -647,11 +526,6 @@ st.markdown(
             color: #856404;
         }
         
-        .status-error {
-            background-color: #f8d7da;
-            color: #721c24;
-        }
-        
         /* Button styling */
         .stButton > button {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -698,30 +572,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Display Railway environment info
-if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-    print("Running on Railway environment")
-    with st.sidebar:
-        st.info("🚂 Running on Railway")
-        with st.expander("Environment Info"):
-            st.code(f"""
-Railway Environment: {os.getenv('RAILWAY_ENVIRONMENT', 'Detected')}
-Project ID: {os.getenv('RAILWAY_PROJECT_ID', 'N/A')}
-Service ID: {os.getenv('RAILWAY_SERVICE_ID', 'N/A')}
-API Key Present: {bool(os.getenv('OPENAI_API_KEY'))}
-            """)
+# Display environment info in sidebar for debugging (optional - remove in production)
+with st.sidebar:
+    st.markdown("### 🔧 Debug Info")
+    api_key = get_openai_api_key()
+    if api_key:
+        st.success(f"✅ API Key: {api_key[:8]}...{api_key[-4:]}")
+    else:
+        st.error("❌ No API key found")
+    
+    # Show environment
+    st.info(f"Environment: {os.getenv('RAILWAY_ENVIRONMENT', 'Local/Streamlit Cloud')}")
 
-# Initialize OpenAI client with Railway-optimized error handling
-print("Initializing OpenAI client...")
-try:
-    client = get_openai_client()
-    print("OpenAI client initialized successfully")
-except:
-    print("Failed to initialize OpenAI client")
-    client = None
+# Initialize OpenAI client
+client = get_openai_client()
 
 # Initialize persistent ChromaDB
-print("Initializing ChromaDB client...")
 ch_client = get_chroma_client()
 if not ch_client:
     st.error("Failed to initialize database. Please check your setup.")
@@ -761,18 +627,12 @@ with col1:
     st.markdown("### Upload your files")
     st.markdown("Drag & drop or click to browse")
     
-    # Show API status
-    if not client:
-        st.error("⚠️ OpenAI API not available. File processing disabled.")
-        st.markdown("Please check your OPENAI_API_KEY environment variable.")
-    
     # File uploader with custom styling
     uploaded_files = st.file_uploader(
         "",
         type=["pdf", "csv", "xlsx", "xls", "txt", "doc", "docx"],
         accept_multiple_files=True,
-        label_visibility="collapsed",
-        disabled=(client is None)
+        label_visibility="collapsed"
     )
     
     st.markdown("**Supports:** .txt, .doc, .docx, .xls, .xlsx, .csv, .pdf")
@@ -797,10 +657,8 @@ with col1:
             )
     
     # Process button
-    if uploaded_files and client:
+    if uploaded_files:
         if st.button("🚀 Process Files"):
-            print(f"Processing {len(uploaded_files)} files...")
-            
             tokenizer = make_tokenizer()
             rag_chunks: List[RAGChunk] = []
             
@@ -809,7 +667,6 @@ with col1:
                 
                 for file_idx, file in enumerate(uploaded_files, 1):
                     st.write(f"Reading **{file.name}** ({file_idx}/{total_files})...")
-                    print(f"Processing file {file_idx}/{total_files}: {file.name}")
                     
                     try:
                         # Check if file already exists in collection
@@ -818,36 +675,20 @@ with col1:
                         
                         if file_already_exists:
                             st.info(f"📁 {file.name} already in database, skipping...")
-                            print(f"File {file.name} already exists, skipping...")
                             continue
                         
-                        # Process different file types
-                        units = []
-                        file_ext = file.name.lower().split('.')[-1]
-                        
-                        if file_ext == "pdf":
+                        if file.name.lower().endswith(".pdf"):
                             units = read_pdf(file)
-                        elif file_ext == "csv":
+                        elif file.name.lower().endswith(".csv"):
                             units = read_csv(file)
-                        elif file_ext in ["xlsx", "xls"]:
+                        elif file.name.lower().endswith((".xlsx", ".xls")):
                             units = read_xlsx(file)
-                        elif file_ext in ["txt", "doc", "docx"]:
-                            try:
-                                content = str(file.read(), "utf-8", errors='ignore')
-                                if content.strip():
-                                    units = [(content, {"source": file.name, "type": file_ext, "page": 1})]
-                            except Exception as txt_error:
-                                print(f"Error reading text file {file.name}: {txt_error}")
-                                st.warning(f"Could not read {file.name}: {txt_error}")
-                                continue
+                        else:
+                            # Handle txt, doc, docx files
+                            content = str(file.read(), "utf-8")
+                            units = [(content, {"source": file.name, "type": "txt", "page": 1})]
                         
-                        if not units:
-                            print(f"No content extracted from {file.name}")
-                            st.warning(f"No content extracted from {file.name}")
-                            continue
-                            
                         st.write(f"Extracted {len(units)} units from {file.name}")
-                        print(f"Extracted {len(units)} units from {file.name}")
                         
                         # Chunk each unit
                         for unit_idx, (unit_text, meta) in enumerate(units):
@@ -864,29 +705,20 @@ with col1:
                                     rag_chunks.append(RAGChunk(id=new_uuid(), text=ch, metadata=chunk_meta))
                     
                     except Exception as e:
-                        print(f"Failed to read {file.name}: {e}")
                         st.error(f"Failed to read {file.name}: {e}")
                         continue
                 
                 if rag_chunks:
                     st.write(f"Adding {len(rag_chunks)} new chunks to permanent database...")
-                    print(f"Adding {len(rag_chunks)} chunks to database...")
-                    
                     success = add_chunks_to_collection(st.session_state.collection, client, rag_chunks)
                     
                     if success:
                         status.update(label="✅ Files processed and permanently stored", state="complete")
-                        print("Files processed successfully")
                         st.rerun()  # Refresh to show new files
                     else:
                         status.update(label="❌ Failed to process files", state="error")
-                        print("Failed to process files")
                 else:
                     status.update(label="ℹ️ No new content to add", state="complete")
-                    print("No new content to add")
-    
-    elif uploaded_files and not client:
-        st.error("Cannot process files: OpenAI API client not available.")
     
     # Show permanently stored files
     st.markdown("---")
@@ -926,7 +758,7 @@ with col2:
     st.markdown("Ask questions about your uploaded documents")
     
     # Status indicator
-    if st.session_state.collection and client:
+    if st.session_state.collection:
         try:
             count = st.session_state.collection.count()
             if count > 0:
@@ -956,15 +788,6 @@ with col2:
                 """,
                 unsafe_allow_html=True
             )
-    elif not client:
-        st.markdown(
-            """
-            <div class="status-indicator status-error">
-                🔴 API not available
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
     
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -972,10 +795,7 @@ with col2:
     if not st.session_state.history:
         with st.chat_message("assistant", avatar="🤖"):
             st.markdown("👋 Hello! I'm **K&B Scout AI**, your enterprise document assistant.")
-            if client:
-                st.markdown("I can help you find information from your uploaded files. What would you like to know?")
-            else:
-                st.markdown("⚠️ OpenAI API is not available. Please check your environment configuration.")
+            st.markdown("I can help you find information from your uploaded files. What would you like to know?")
     
     # Chat history
     for msg in st.session_state.history:
@@ -984,22 +804,15 @@ with col2:
             st.markdown(msg["content"])
 
     # Chat input
-    prompt = st.chat_input(
-        "Ask K&B Scout AI about your documents..." if client else "API not available - check configuration",
-        disabled=(not client)
-    )
+    prompt = st.chat_input("Ask K&B Scout AI about your documents...")
     
-    if prompt and client:
-        print(f"User query: {prompt}")
-        
+    if prompt:
         # Check if we have any documents
         if not st.session_state.collection:
             st.warning("Database not initialized. Please refresh the page.")
         else:
             try:
                 doc_count = st.session_state.collection.count()
-                print(f"Collection has {doc_count} documents")
-                
                 if doc_count == 0:
                     # Show message even without documents
                     st.session_state.history.append({"role": "user", "content": prompt})
@@ -1032,55 +845,17 @@ with col2:
                             # Stream response
                             try:
                                 stream = answer_with_rag(client, prompt, context_text)
-                                if stream:
-                                    answer_accum = ""
-                                    for chunk in stream:
-                                        delta = chunk.choices[0].delta.content or ""
-                                        answer_accum += delta
-                                        placeholder.markdown(answer_accum)
-                                    st.session_state.history.append({"role": "assistant", "content": answer_accum})
-                                else:
-                                    placeholder.markdown("Sorry, I couldn't generate a response right now.")
+                                answer_accum = ""
+                                for chunk in stream:
+                                    delta = chunk.choices[0].delta.content or ""
+                                    answer_accum += delta
+                                    placeholder.markdown(answer_accum)
+                                st.session_state.history.append({"role": "assistant", "content": answer_accum})
                             except Exception as e:
-                                print(f"Error generating response: {e}")
                                 st.error(f"Error generating response: {e}")
             except Exception as e:
-                print(f"Error processing question: {e}")
                 st.error(f"Error processing question: {e}")
 
     # Chat controls at bottom
     if st.session_state.history:
         col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("🔄 Clear Chat"):
-                st.session_state.history = []
-                st.rerun()
-        with col_b:
-            if st.button("🗑️ Clear All Data"):
-                if st.session_state.collection:
-                    try:
-                        ch_client.delete_collection(name="kb_scout_documents")
-                        st.session_state.collection = get_or_create_collection(ch_client, "kb_scout_documents")
-                        st.session_state.history = []
-                        st.success("All data cleared successfully!")
-                        print("All data cleared")
-                        st.rerun()
-                    except Exception as e:
-                        print(f"Error clearing data: {e}")
-                        st.error(f"Error clearing data: {e}")
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# Footer
-st.markdown("---")
-st.markdown(
-    """
-    <div style="text-align: center; color: #6c757d; font-size: 12px; padding: 10px;">
-        💡 <strong>Tip:</strong> Upload your documents on the left, then ask questions about them on the right!<br>
-        Your files are stored in database and will be available during this session.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
