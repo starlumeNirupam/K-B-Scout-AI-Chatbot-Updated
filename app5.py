@@ -1,861 +1,498 @@
 import sys
-import importlib
-
-try:
-    import pysqlite3  # installed via pysqlite3-binary
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except Exception:
-    # fallback: if not installed or something odd, try to import sqlite3 anyway
-    pass
-
-# (optional) sanity check: print the sqlite version to logs
-try:
-    import sqlite3
-    print("SQLite version:", sqlite3.sqlite_version)
-except Exception:
-    pass
-# ----------------------------------------------------------------
-
 import os
 import uuid
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from dataclasses import dataclass
 
-import pytesseract
-from pdf2image import convert_from_path
-from PIL import Image
+# SQLite compatibility fix
+try:
+    import pysqlite3
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except ImportError:
+    pass
 
 import streamlit as st
 import pandas as pd
-
-# PDF
 from pypdf import PdfReader
-
-# Vector DB
 import chromadb
-from chromadb.config import Settings
-
-# Tokenization & chunking
-import tiktoken
-
-# OpenAI SDK v1
 from openai import OpenAI
 
-# Load environment variables (for local development)
-from dotenv import load_dotenv
-load_dotenv()
+# Load environment variables for local development
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # -----------------------------
-# ---------- Utils ------------
+# Configuration
 # -----------------------------
 
 def get_openai_api_key():
-    """Get OpenAI API key from multiple sources (Streamlit secrets, environment variables)."""
-    api_key = None
-    
-    # Try Streamlit secrets first (for Streamlit Cloud)
+    """Get OpenAI API key from environment or Streamlit secrets."""
+    # Try Streamlit secrets first
     try:
-        api_key = st.secrets["OPENAI_API_KEY"]
-        print("✅ API key loaded from Streamlit secrets")
-    except Exception as e:
-        print(f"❌ Could not load from Streamlit secrets: {e}")
+        key = st.secrets["OPENAI_API_KEY"]
+        return key.strip()
+    except:
         pass
     
-    # Fall back to environment variable (for Railway and local)
-    if not api_key:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            print("✅ API key loaded from environment variable")
-        else:
-            print("❌ No API key found in environment variables")
+    # Try environment variable
+    key = os.getenv("OPENAI_API_KEY")
+    if key:
+        return key.strip()
     
-    return api_key
+    return None
 
-def get_openai_client() -> OpenAI:
-    """Create OpenAI client with proper error handling."""
+def create_openai_client():
+    """Create and validate OpenAI client."""
     api_key = get_openai_api_key()
     
     if not api_key:
-        st.error("❌ **No OpenAI API key found!**")
-        st.error("Please configure your API key:")
-        st.code("""
-For Streamlit Cloud:
-1. Go to your app settings
-2. Add to Secrets (TOML format):
-   OPENAI_API_KEY = "your-key-here"
-
-For Railway:
-1. Go to your project dashboard
-2. Add environment variable:
-   OPENAI_API_KEY = your-key-here
+        st.error("🚨 **OpenAI API Key Missing**")
+        st.markdown("""
+        **For Railway:** Add environment variable `OPENAI_API_KEY`
+        
+        **For Streamlit Cloud:** Add to secrets: `OPENAI_API_KEY = "your-key"`
         """)
         st.stop()
     
-    # Validate key format
     if not api_key.startswith(('sk-', 'sk-proj-')):
-        st.error("❌ **Invalid OpenAI API key format!**")
-        st.error("API key should start with 'sk-' or 'sk-proj-'")
+        st.error("❌ Invalid API key format")
         st.stop()
     
     try:
         client = OpenAI(api_key=api_key)
-        # Test the client with a minimal request
-        print(f"✅ OpenAI client created successfully")
+        # Test the client
+        client.embeddings.create(input=["test"], model="text-embedding-3-small")
         return client
     except Exception as e:
-        st.error(f"❌ **Error creating OpenAI client:** {e}")
+        st.error(f"❌ **OpenAI Error:** {str(e)[:100]}...")
+        st.error("Try generating a new API key at https://platform.openai.com/api-keys")
         st.stop()
 
-def new_uuid() -> str:
-    return str(uuid.uuid4())
-
-def make_tokenizer():
-    return tiktoken.get_encoding("cl100k_base")
-
-def chunk_text(
-    text: str,
-    tokenizer,
-    chunk_tokens: int = 800,
-    overlap_tokens: int = 150
-) -> List[str]:
-    if not text or not text.strip():
-        return []
-    tokens = tokenizer.encode(text)
-    if len(tokens) == 0:
-        return []
-    chunks = []
-    start = 0
-    while start < len(tokens):
-        end = min(start + chunk_tokens, len(tokens))
-        chunk = tokenizer.decode(tokens[start:end])
-        if chunk.strip():
-            chunks.append(chunk.strip())
-        if end == len(tokens):
-            break
-        start = end - overlap_tokens
-        if start < 0:
-            start = 0
-    return chunks
-
-def read_pdf(file) -> list[tuple[str, dict]]:
-    """Extract text from a PDF with OCR fallback."""
-    reader = PdfReader(file)
-    pages = []
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        if text.strip():
-            pages.append((text, {"source": file.name, "type": "pdf", "page": i+1}))
-        else:
-            # OCR fallback
-            try:
-                images = convert_from_path(file.name, first_page=i+1, last_page=i+1, dpi=300)
-                ocr_text = ""
-                for img in images:
-                    ocr_text += pytesseract.image_to_string(img)
-                pages.append((ocr_text, {"source": file.name, "type": "pdf", "page": i+1}))
-            except:
-                # If OCR fails, add empty page
-                pages.append(("", {"source": file.name, "type": "pdf", "page": i+1}))
-    return pages
-
-def read_csv(file) -> List[Tuple[str, Dict]]:
-    """Returns (row_text, metadata) per row."""
-    try:
-        df = pd.read_csv(file)
-        rows = []
-        for idx, row in df.iterrows():
-            row_values = []
-            for col in df.columns:
-                val = row[col]
-                if pd.notna(val):
-                    row_values.append(f"{col}: {val}")
-            
-            if row_values:
-                row_text = " | ".join(row_values)
-                rows.append((row_text, {"source": file.name, "type": "csv", "row": int(idx) + 1}))
-        return rows
-    except Exception as e:
-        st.error(f"Error reading CSV {file.name}: {e}")
-        return []
-
-def read_xlsx(file) -> List[Tuple[str, Dict]]:
-    try:
-        df = pd.read_excel(file)
-        rows = []
-        for idx, row in df.iterrows():
-            row_values = []
-            for col in df.columns:
-                val = row[col]
-                if pd.notna(val):
-                    row_values.append(f"{col}: {val}")
-            
-            if row_values:
-                row_text = " | ".join(row_values)
-                rows.append((row_text, {"source": file.name, "type": "xlsx", "row": int(idx) + 1}))
-        return rows
-    except Exception as e:
-        st.error(f"Error reading Excel {file.name}: {e}")
-        return []
-
-def safe_clean(s: str) -> str:
-    if not s:
-        return ""
-    cleaned = s.replace("\x00", " ").replace("\r", " ").replace("\n", " ")
-    cleaned = " ".join(cleaned.split())
-    return cleaned.strip()
+# -----------------------------
+# Document Processing
+# -----------------------------
 
 @dataclass
-class RAGChunk:
+class Document:
     id: str
     text: str
-    metadata: Dict
+    source: str
+    page: int = 1
 
-# -----------------------------
-# ------ Vector Store ---------
-# -----------------------------
+def simple_chunk_text(text: str, max_length: int = 3000) -> List[str]:
+    """Simple text chunking by sentences."""
+    if not text.strip():
+        return []
+    
+    sentences = text.split('. ')
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        test_chunk = current_chunk + sentence + ". "
+        if len(test_chunk) < max_length:
+            current_chunk = test_chunk
+        else:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + ". "
+    
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
 
-def get_chroma_client():
-    """Creates a persistent ChromaDB client."""
-    persist_dir = "./chromadb_storage"
+def process_pdf(file) -> List[Document]:
+    """Process PDF file."""
     try:
-        os.makedirs(persist_dir, exist_ok=True)
-        client = chromadb.PersistentClient(path=persist_dir)
-        return client
+        reader = PdfReader(file)
+        documents = []
+        
+        for page_num, page in enumerate(reader.pages, 1):
+            text = page.extract_text()
+            if text.strip():
+                chunks = simple_chunk_text(text)
+                for chunk in chunks:
+                    if chunk.strip():
+                        doc = Document(
+                            id=str(uuid.uuid4()),
+                            text=chunk,
+                            source=file.name,
+                            page=page_num
+                        )
+                        documents.append(doc)
+        
+        return documents
     except Exception as e:
-        st.error(f"Could not create persistent client: {e}")
+        st.error(f"Error processing PDF: {str(e)[:100]}...")
+        return []
+
+def process_csv(file) -> List[Document]:
+    """Process CSV file."""
+    try:
+        df = pd.read_csv(file)
+        documents = []
+        
+        for idx, row in df.iterrows():
+            row_data = []
+            for col, val in row.items():
+                if pd.notna(val):
+                    row_data.append(f"{col}: {val}")
+            
+            if row_data:
+                text = " | ".join(row_data)
+                doc = Document(
+                    id=str(uuid.uuid4()),
+                    text=text,
+                    source=file.name,
+                    page=idx + 1
+                )
+                documents.append(doc)
+        
+        return documents
+    except Exception as e:
+        st.error(f"Error processing CSV: {str(e)[:100]}...")
+        return []
+
+def process_text_file(file) -> List[Document]:
+    """Process text file."""
+    try:
+        content = str(file.read(), 'utf-8')
+        chunks = simple_chunk_text(content)
+        documents = []
+        
+        for i, chunk in enumerate(chunks):
+            if chunk.strip():
+                doc = Document(
+                    id=str(uuid.uuid4()),
+                    text=chunk,
+                    source=file.name,
+                    page=i + 1
+                )
+                documents.append(doc)
+        
+        return documents
+    except Exception as e:
+        st.error(f"Error processing text file: {str(e)[:100]}...")
+        return []
+
+# -----------------------------
+# Vector Database
+# -----------------------------
+
+@st.cache_resource
+def get_vector_db():
+    """Initialize ChromaDB."""
+    try:
+        client = chromadb.PersistentClient(path="./chroma_data")
+        collection = client.get_or_create_collection(name="documents")
+        return collection
+    except Exception as e:
+        st.error(f"Database initialization error: {str(e)[:100]}...")
         return None
 
-def get_or_create_collection(chroma_client, collection_name: str = "kb_scout_documents"):
-    """Get existing collection or create new one."""
+def add_documents_to_db(documents: List[Document], openai_client: OpenAI):
+    """Add documents to vector database."""
+    if not documents:
+        return False
+    
+    collection = get_vector_db()
+    if not collection:
+        return False
+    
     try:
-        # Try to get existing collection first
-        collection = chroma_client.get_collection(name=collection_name)
-        return collection
-    except:
-        # Create new collection if it doesn't exist
-        try:
-            return chroma_client.create_collection(
-                name=collection_name,
-                metadata={"hnsw:space": "cosine"}
-            )
-        except Exception as e:
-            st.error(f"Error creating collection: {e}")
-            return None
-
-def embed_texts(client: OpenAI, texts: List[str], model: str = "text-embedding-3-small", batch_size: int = 100) -> List[List[float]]:
-    """Batches embeddings to avoid hitting request-size limits."""
-    if not texts:
-        return []
-    
-    all_embeddings: List[List[float]] = []
-    total_batches = (len(texts) + batch_size - 1) // batch_size
-    
-    for i in range(0, len(texts), batch_size):
-        batch_num = (i // batch_size) + 1
-        st.write(f"Processing embedding batch {batch_num}/{total_batches}...")
-        
-        batch = texts[i:i + batch_size]
-        try:
-            resp = client.embeddings.create(input=batch, model=model)
-            batch_embeddings = [d.embedding for d in resp.data]
-            all_embeddings.extend(batch_embeddings)
-        except Exception as e:
-            st.error(f"Error creating embeddings for batch {batch_num}: {e}")
-            # Print more details about the error
-            st.error(f"Error details: {str(e)}")
-            return []
-    
-    return all_embeddings
-
-def add_chunks_to_collection(collection, client: OpenAI, rag_chunks: List[RAGChunk]):
-    """Add chunks to persistent collection."""
-    if not rag_chunks or not collection:
-        return False
-    
-    valid_chunks = [c for c in rag_chunks if c.text and c.text.strip()]
-    if not valid_chunks:
-        return False
-    
-    documents = [c.text for c in valid_chunks]
-    metadatas = [c.metadata for c in valid_chunks]
-    ids = [c.id for c in valid_chunks]
-
-    embeddings = embed_texts(client, documents)
-    
-    if not embeddings or len(embeddings) != len(documents):
-        return False
-
-    try:
-        collection.add(
-            documents=documents,
-            metadatas=metadatas,
-            ids=ids,
-            embeddings=embeddings
+        # Create embeddings
+        texts = [doc.text for doc in documents]
+        embeddings_response = openai_client.embeddings.create(
+            input=texts,
+            model="text-embedding-3-small"
         )
+        embeddings = [data.embedding for data in embeddings_response.data]
+        
+        # Add to collection
+        collection.add(
+            ids=[doc.id for doc in documents],
+            documents=texts,
+            embeddings=embeddings,
+            metadatas=[{"source": doc.source, "page": doc.page} for doc in documents]
+        )
+        
         return True
     except Exception as e:
-        st.error(f"Error adding to collection: {e}")
+        st.error(f"Error adding to database: {str(e)[:100]}...")
         return False
 
-def retrieve(collection, client: OpenAI, query: str, top_k: int = 6) -> List[Tuple[str, Dict, float]]:
+def search_similar_documents(query: str, openai_client: OpenAI, limit: int = 5):
+    """Search for similar documents."""
+    collection = get_vector_db()
     if not collection:
         return []
     
-    count = collection.count()
-    if count == 0:
-        return []
-    
     try:
-        q_emb = embed_texts(client, [query])[0]
-        res = collection.query(
-            query_embeddings=[q_emb],
-            n_results=min(top_k, count),
-            include=["documents", "metadatas", "distances"]
+        # Create query embedding
+        query_embedding = openai_client.embeddings.create(
+            input=[query],
+            model="text-embedding-3-small"
+        ).data[0].embedding
+        
+        # Search
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(limit, collection.count()),
+            include=["documents", "metadatas"]
         )
-        docs = res.get("documents", [[]])[0]
-        metas = res.get("metadatas", [[]])[0]
-        dists = res.get("distances", [[]])[0]
         
-        scored = list(zip(docs, metas, dists))
-        scored.sort(key=lambda x: x[2])
-        return scored
+        return results
     except Exception as e:
-        st.error(f"Error during retrieval: {e}")
+        st.error(f"Search error: {str(e)[:100]}...")
         return []
 
-def format_context(snippets: List[Tuple[str, Dict, float]]) -> str:
-    blocks = []
-    for i, (doc, meta, dist) in enumerate(snippets, 1):
-        src = meta.get("source", "unknown")
-        if meta.get("type") == "pdf":
-            loc = f"page {meta.get('page', 'unknown')}"
-        else:
-            loc = f"row {meta.get('row', 'unknown')}"
-        blocks.append(f"[{i}] Source: {src} ({meta.get('type','')}, {loc})\n{doc}")
-    return "\n\n".join(blocks)
+def get_total_documents():
+    """Get total document count."""
+    collection = get_vector_db()
+    if collection:
+        try:
+            return collection.count()
+        except:
+            return 0
+    return 0
 
-def get_uploaded_files_from_collection(collection):
-    """Get list of unique files that have been uploaded to the collection."""
-    if not collection:
-        return []
+# -----------------------------
+# AI Chat
+# -----------------------------
+
+def generate_response(question: str, context: str, openai_client: OpenAI) -> str:
+    """Generate AI response."""
+    system_prompt = """You are a helpful assistant that answers questions based on provided context.
+If the answer isn't in the context, say you don't have enough information."""
+    
+    user_prompt = f"""Context: {context}
+
+Question: {question}
+
+Please provide a helpful answer based on the context above."""
     
     try:
-        # Get all metadata to find unique source files
-        all_data = collection.get(include=["metadatas"])
-        metadatas = all_data.get("metadatas", [])
-        
-        files = set()
-        for meta in metadatas:
-            if "source" in meta and "type" in meta:
-                files.add((meta["source"], meta["type"]))
-        
-        return list(files)
-    except:
-        return []
-
-SYSTEM_PROMPT = """You are K&B Scout AI, a helpful enterprise document assistant.
-Follow these rules:
-- Use only the information in <context> ... </context>.
-- If the answer cannot be found in the context, say you do not have enough information.
-- Be concise and cite sources as [#] using the bracket numbers that appear in the context.
-- Be friendly and professional in your responses.
-"""
-
-def answer_with_rag(client: OpenAI, question: str, context_text: str):
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"<context>\n{context_text}\n</context>\n\nQuestion: {question}\nAnswer:"
-        }
-    ]
-
-    return client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.0,
-        stream=True
-    )
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=500
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Sorry, I encountered an error: {str(e)[:100]}..."
 
 # -----------------------------
-# --------- UI Layer ----------
+# Streamlit App
 # -----------------------------
 
+# Page configuration
 st.set_page_config(
-    page_title="K&B Scout AI Enterprise Assistant", 
-    page_icon="🤖", 
-    layout="wide",
-    initial_sidebar_state="collapsed"
+    page_title="K&B Scout AI",
+    page_icon="🤖",
+    layout="wide"
 )
 
-# Custom CSS matching the design
-st.markdown(
-    """
-    <style>
-        .stApp {
-            background-color: #f8f9fa;
-            padding: 0 !important;
-        }
-        
-        /* Hide default streamlit elements and spacing */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        header {visibility: hidden;}
-        .block-container {
-            padding-top: 0 !important;
-            padding-bottom: 0 !important;
-            max-width: 100% !important;
-        }
-        
-        /* Remove all default margins and padding */
-        .main .block-container {
-            padding: 0 !important;
-            margin: 0 !important;
-        }
-        
-        /* Main container styling */
-        .main-container {
-            background-color: white;
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            min-height: 10vh;
-        }
-        
-        /* Header styling */
-        .app-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px 30px;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            margin: 0;
-        }
-        
-        .app-title {
-            font-size: 24px;
-            font-weight: bold;
-            margin: 0;
-        }
-        
-        .app-subtitle {
-            font-size: 14px;
-            opacity: 0.9;
-            margin: 0;
-        }
-        
-        /* Content area */
-        .content-area {
-            display: flex;
-            min-height: calc(100vh - 80px);
-            margin: 0;
-            padding: 0;
-        }
-        
-        /* Upload section */
-        .upload-section {
-            flex: 1;
-            padding: 30px;
-            border-right: 1px solid #e9ecef;
-            background-color: #fafbfc;
-        }
-        
-        .upload-area {
-            border: 2px dashed #dee2e6;
-            border-radius: 8px;
-            padding: 40px 20px;
-            text-align: center;
-            background-color: white;
-            transition: all 0.3s ease;
-        }
-        
-        .upload-area:hover {
-            border-color: #667eea;
-            background-color: #f8f9ff;
-        }
-        
-        .file-item {
-            background-color: white;
-            border: 1px solid #e9ecef;
-            border-radius: 6px;
-            padding: 10px 15px;
-            margin: 5px 0;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .file-icon {
-            color: #667eea;
-            font-size: 16px;
-        }
-        
-        /* Chat section */
-        .chat-section {
-            flex: 1.2;
-            padding: 30px;
-            background-color: white;
-            display: flex;
-            flex-direction: column;
-        }
-        
-        .chat-header {
-            border-bottom: 1px solid #e9ecef;
-            padding-bottom: 15px;
-            margin-bottom: 20px;
-        }
-        
-        .status-indicator {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 500;
-        }
-        
-        .status-ready {
-            background-color: #d4edda;
-            color: #155724;
-        }
-        
-        .status-waiting {
-            background-color: #fff3cd;
-            color: #856404;
-        }
-        
-        /* Button styling */
-        .stButton > button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 6px;
-            font-weight: 500;
-            width: 100%;
-            transition: all 0.3s ease;
-        }
-        
-        .stButton > button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-        }
-        
-        /* Chat input styling */
-        .stChatInput > div > div > textarea {
-            border-radius: 20px;
-            border: 1px solid #e9ecef;
-            padding: 12px 20px;
-        }
-        
-        /* Section headers */
-        .section-header {
-            font-size: 20px;
-            font-weight: 600;
-            color: #2c3e50;
-            margin: 0 0 15px 0;
-        }
-        
-        /* Remove streamlit spacing */
-        .element-container {
-            margin: 0 !important;
-        }
-        
-        /* Hide streamlit branding */
-        .css-1rs6os, .css-17eq0hr {
-            display: none;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# Display environment info in sidebar for debugging (optional - remove in production)
-with st.sidebar:
-    st.markdown("### 🔧 Debug Info")
-    api_key = get_openai_api_key()
-    if api_key:
-        st.success(f"✅ API Key: {api_key[:8]}...{api_key[-4:]}")
-    else:
-        st.error("❌ No API key found")
-    
-    # Show environment
-    st.info(f"Environment: {os.getenv('RAILWAY_ENVIRONMENT', 'Local/Streamlit Cloud')}")
-
-# Initialize OpenAI client
-client = get_openai_client()
-
-# Initialize persistent ChromaDB
-ch_client = get_chroma_client()
-if not ch_client:
-    st.error("Failed to initialize database. Please check your setup.")
-    st.stop()
-
-# Session state
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "collection" not in st.session_state:
-    # Always use the same collection for persistence
-    st.session_state.collection = get_or_create_collection(ch_client, "kb_scout_documents")
-
-# Main container
-st.markdown('<div class="main-container">', unsafe_allow_html=True)
+# Custom CSS
+st.markdown("""
+<style>
+    .header-container {
+        background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
+        padding: 2rem;
+        border-radius: 15px;
+        text-align: center;
+        color: white;
+        margin-bottom: 2rem;
+    }
+    .upload-container {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 1px solid #dee2e6;
+    }
+    .status-badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 20px;
+        font-size: 0.875rem;
+        font-weight: bold;
+        margin-bottom: 1rem;
+    }
+    .status-success {
+        background-color: #d4edda;
+        color: #155724;
+    }
+    .status-info {
+        background-color: #d1ecf1;
+        color: #0c5460;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Header
-st.markdown(
-    """
-    <div class="app-header">
-        <div style="font-size: 28px;">🤖</div>
-        <div>
-            <div class="app-title">K&B Scout AI</div>
-            <div class="app-subtitle">Enterprise Assistant</div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<div class="header-container">
+    <h1>🤖 K&B Scout AI</h1>
+    <p>Enterprise Document Assistant - Upload, Search, and Chat with your documents</p>
+</div>
+""", unsafe_allow_html=True)
 
-# Main content area
-col1, col2 = st.columns([1, 1.2])
+# Initialize OpenAI client
+openai_client = create_openai_client()
+st.success("✅ OpenAI connection established")
 
-# Left column - File Upload
-with col1:
-    st.markdown('<div class="upload-section">', unsafe_allow_html=True)
+# Initialize session state for chat
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# Main layout
+left_col, right_col = st.columns([1, 2])
+
+# Left column - File upload
+with left_col:
+    st.markdown("### 📁 Document Upload")
     
-    st.markdown("### Upload your files")
-    st.markdown("Drag & drop or click to browse")
+    # Document count display
+    doc_count = get_total_documents()
+    st.markdown(f'<span class="status-badge status-success">📊 Total Documents: {doc_count}</span>', unsafe_allow_html=True)
     
-    # File uploader with custom styling
+    # File uploader (with explicit label)
     uploaded_files = st.file_uploader(
-        "",
-        type=["pdf", "csv", "xlsx", "xls", "txt", "doc", "docx"],
+        label="Choose files to upload",
+        type=["pdf", "csv", "txt"],
         accept_multiple_files=True,
-        label_visibility="collapsed"
+        key="document_uploader",
+        help="Select PDF, CSV, or TXT files to upload"
     )
     
-    st.markdown("**Supports:** .txt, .doc, .docx, .xls, .xlsx, .csv, .pdf")
-    
-    # Show uploaded files count
+    # Process files button
     if uploaded_files:
-        st.markdown(f"**Selected files ({len(uploaded_files)}):**")
-        for file in uploaded_files:
-            file_type_icon = {
-                "pdf": "📄", "csv": "📊", "xlsx": "📊", "xls": "📊", 
-                "txt": "📝", "doc": "📝", "docx": "📝"
-            }.get(file.name.split('.')[-1].lower(), "📎")
+        st.info(f"Selected {len(uploaded_files)} file(s)")
+        
+        if st.button("🚀 Process Documents", key="process_button"):
+            progress_container = st.container()
             
-            st.markdown(
-                f"""
-                <div class="file-item">
-                    <span class="file-icon">{file_type_icon}</span>
-                    <span>{file.name}</span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-    
-    # Process button
-    if uploaded_files:
-        if st.button("🚀 Process Files"):
-            tokenizer = make_tokenizer()
-            rag_chunks: List[RAGChunk] = []
-            
-            with st.status("Processing your files…", expanded=True) as status:
-                total_files = len(uploaded_files)
+            with progress_container:
+                progress_bar = st.progress(0, text="Starting processing...")
                 
-                for file_idx, file in enumerate(uploaded_files, 1):
-                    st.write(f"Reading **{file.name}** ({file_idx}/{total_files})...")
+                all_docs = []
+                for i, file in enumerate(uploaded_files):
+                    progress_bar.progress(
+                        (i + 1) / len(uploaded_files), 
+                        text=f"Processing {file.name}..."
+                    )
                     
-                    try:
-                        # Check if file already exists in collection
-                        existing_files = get_uploaded_files_from_collection(st.session_state.collection)
-                        file_already_exists = any(existing_file[0] == file.name for existing_file in existing_files)
-                        
-                        if file_already_exists:
-                            st.info(f"📁 {file.name} already in database, skipping...")
-                            continue
-                        
-                        if file.name.lower().endswith(".pdf"):
-                            units = read_pdf(file)
-                        elif file.name.lower().endswith(".csv"):
-                            units = read_csv(file)
-                        elif file.name.lower().endswith((".xlsx", ".xls")):
-                            units = read_xlsx(file)
-                        else:
-                            # Handle txt, doc, docx files
-                            content = str(file.read(), "utf-8")
-                            units = [(content, {"source": file.name, "type": "txt", "page": 1})]
-                        
-                        st.write(f"Extracted {len(units)} units from {file.name}")
-                        
-                        # Chunk each unit
-                        for unit_idx, (unit_text, meta) in enumerate(units):
-                            unit_text = safe_clean(unit_text)
-                            if not unit_text:
-                                continue
-                            
-                            chunks = chunk_text(unit_text, tokenizer)
-                            
-                            for chunk_idx, ch in enumerate(chunks):
-                                if ch.strip():
-                                    chunk_meta = meta.copy()
-                                    chunk_meta["chunk_id"] = chunk_idx + 1
-                                    rag_chunks.append(RAGChunk(id=new_uuid(), text=ch, metadata=chunk_meta))
-                    
-                    except Exception as e:
-                        st.error(f"Failed to read {file.name}: {e}")
-                        continue
-                
-                if rag_chunks:
-                    st.write(f"Adding {len(rag_chunks)} new chunks to permanent database...")
-                    success = add_chunks_to_collection(st.session_state.collection, client, rag_chunks)
-                    
-                    if success:
-                        status.update(label="✅ Files processed and permanently stored", state="complete")
-                        st.rerun()  # Refresh to show new files
+                    if file.name.lower().endswith('.pdf'):
+                        docs = process_pdf(file)
+                    elif file.name.lower().endswith('.csv'):
+                        docs = process_csv(file)
+                    elif file.name.lower().endswith('.txt'):
+                        docs = process_text_file(file)
                     else:
-                        status.update(label="❌ Failed to process files", state="error")
-                else:
-                    status.update(label="ℹ️ No new content to add", state="complete")
-    
-    # Show permanently stored files
-    st.markdown("---")
-    st.markdown("### Uploaded Files")
-    
-    uploaded_files_list = get_uploaded_files_from_collection(st.session_state.collection)
-    
-    if uploaded_files_list:
-        st.markdown(f"**{len(uploaded_files_list)} file(s) in database:**")
-        for filename, filetype in uploaded_files_list:
-            file_icon = {
-                "pdf": "📄", "csv": "📊", "xlsx": "📊", "xls": "📊", 
-                "txt": "📝", "doc": "📝", "docx": "📝"
-            }.get(filetype, "📎")
-            
-            st.markdown(
-                f"""
-                <div class="file-item">
-                    <span class="file-icon">{file_icon}</span>
-                    <span>{filename}</span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-    else:
-        st.info("No files uploaded yet")
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# Right column - Chat Interface
-with col2:
-    st.markdown('<div class="chat-section">', unsafe_allow_html=True)
-    
-    # Chat header
-    st.markdown('<div class="chat-header">', unsafe_allow_html=True)
-    st.markdown("### Chat with K&B Scout AI")
-    st.markdown("Ask questions about your uploaded documents")
-    
-    # Status indicator
-    if st.session_state.collection:
-        try:
-            count = st.session_state.collection.count()
-            if count > 0:
-                st.markdown(
-                    f"""
-                    <div class="status-indicator status-ready">
-                        🟢 Ready • {count} documents indexed
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-            else:
-                st.markdown(
-                    """
-                    <div class="status-indicator status-waiting">
-                        🟡 Upload files to get started
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-        except:
-            st.markdown(
-                """
-                <div class="status-indicator status-waiting">
-                    🟡 Database not ready
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Initial greeting
-    if not st.session_state.history:
-        with st.chat_message("assistant", avatar="🤖"):
-            st.markdown("👋 Hello! I'm **K&B Scout AI**, your enterprise document assistant.")
-            st.markdown("I can help you find information from your uploaded files. What would you like to know?")
-    
-    # Chat history
-    for msg in st.session_state.history:
-        avatar = "🤖" if msg["role"] == "assistant" else "👤"
-        with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"])
-
-    # Chat input
-    prompt = st.chat_input("Ask K&B Scout AI about your documents...")
-    
-    if prompt:
-        # Check if we have any documents
-        if not st.session_state.collection:
-            st.warning("Database not initialized. Please refresh the page.")
-        else:
-            try:
-                doc_count = st.session_state.collection.count()
-                if doc_count == 0:
-                    # Show message even without documents
-                    st.session_state.history.append({"role": "user", "content": prompt})
-                    with st.chat_message("user", avatar="👤"):
-                        st.markdown(prompt)
+                        continue
                     
-                    with st.chat_message("assistant", avatar="🤖"):
-                        response = "I'd be happy to help, but I don't have any documents to search through yet. Please upload some files first, and then I can answer questions about their content!"
-                        st.markdown(response)
-                        st.session_state.history.append({"role": "assistant", "content": response})
+                    all_docs.extend(docs)
+                
+                if all_docs:
+                    progress_bar.progress(1.0, text="Adding to database...")
+                    
+                    if add_documents_to_db(all_docs, openai_client):
+                        st.success(f"✅ Successfully processed {len(all_docs)} document chunks!")
+                        st.balloons()
+                        # Rerun to update document count
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to add documents to database")
                 else:
-                    # Process question with RAG
-                    st.session_state.history.append({"role": "user", "content": prompt})
-                    with st.chat_message("user", avatar="👤"):
-                        st.markdown(prompt)
+                    st.warning("⚠️ No content extracted from uploaded files")
+                
+                progress_bar.empty()
 
-                    with st.chat_message("assistant", avatar="🤖"):
-                        placeholder = st.empty()
+# Right column - Chat interface  
+with right_col:
+    st.markdown("### 💬 Chat Interface")
+    
+    # Display chat history
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
+    # Chat input with explicit key
+    user_input = st.chat_input(
+        placeholder="Ask me anything about your documents...",
+        key="chat_input_main"
+    )
+    
+    if user_input:
+        # Add user message to chat
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        
+        # Generate response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                if doc_count == 0:
+                    response = "I don't have any documents to reference yet. Please upload some documents first!"
+                else:
+                    # Search for relevant documents
+                    search_results = search_similar_documents(user_input, openai_client)
+                    
+                    if search_results and search_results.get('documents') and search_results['documents'][0]:
+                        # Build context from search results
+                        context_parts = []
+                        documents = search_results['documents'][0]
+                        metadatas = search_results['metadatas'][0]
                         
-                        # Retrieve relevant documents
-                        retrieved = retrieve(st.session_state.collection, client, prompt)
+                        for i, (doc, meta) in enumerate(zip(documents, metadatas)):
+                            source = meta.get('source', 'Unknown')
+                            page = meta.get('page', 1)
+                            context_parts.append(f"[Source: {source}, Page: {page}]\n{doc}")
                         
-                        if not retrieved:
-                            answer = "I couldn't find any relevant information in your uploaded documents for this question."
-                            placeholder.markdown(answer)
-                            st.session_state.history.append({"role": "assistant", "content": answer})
-                        else:
-                            context_text = format_context(retrieved)
-                            
-                            # Stream response
-                            try:
-                                stream = answer_with_rag(client, prompt, context_text)
-                                answer_accum = ""
-                                for chunk in stream:
-                                    delta = chunk.choices[0].delta.content or ""
-                                    answer_accum += delta
-                                    placeholder.markdown(answer_accum)
-                                st.session_state.history.append({"role": "assistant", "content": answer_accum})
-                            except Exception as e:
-                                st.error(f"Error generating response: {e}")
-            except Exception as e:
-                st.error(f"Error processing question: {e}")
+                        context = "\n\n".join(context_parts)
+                        response = generate_response(user_input, context, openai_client)
+                    else:
+                        response = "I couldn't find relevant information in your documents for this question."
+            
+            st.markdown(response)
+        
+        # Add assistant response to chat
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
 
-    # Chat controls at bottom
-    if st.session_state.history:
-        col_a, col_b = st.columns(2)
+# Sidebar with controls
+with st.sidebar:
+    st.markdown("### 🔧 Controls")
+    
+    if st.button("🗑️ Clear Chat History", key="clear_chat"):
+        st.session_state.chat_history = []
+        st.rerun()
+    
+    st.markdown("---")
+    
+    st.markdown("### 📋 Supported Files")
+    st.markdown("- 📄 **PDF** - Text documents")
+    st.markdown("- 📊 **CSV** - Data tables") 
+    st.markdown("- 📝 **TXT** - Plain text files")
+    
+    st.markdown("---")
+    
+    st.markdown("### ℹ️ How to Use")
+    st.markdown("1. **Upload** your documents")
+    st.markdown("2. **Wait** for processing")
+    st.markdown("3. **Ask** questions in natural language")
+    st.markdown("4. **Get** answers based on your documents")
+
+# Footer
+st.markdown("---")
+st.markdown(
+    '<div style="text-align: center; color: #6c757d; font-size: 14px;">🤖 K&B Scout AI - Powered by OpenAI & ChromaDB</div>',
+    unsafe_allow_html=True
+)
