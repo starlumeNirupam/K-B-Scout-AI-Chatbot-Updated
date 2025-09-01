@@ -610,62 +610,62 @@ st.markdown('</div>', unsafe_allow_html=True)
 prompt = st.chat_input("Ask K&B Scout AI about your documents...")
 
 if prompt:
-        if doc_count == 0:
-            # Show message even without documents
-            st.session_state.history.append({"role": "user", "content": prompt})
-            with st.chat_message("user", avatar="👤"):
-                st.markdown(prompt)
+if prompt:
+    doc_count = st.session_state.vector_store.count()
+    if doc_count == 0:
+        # Show message even without documents
+        st.session_state.history.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant", avatar="🤖"):
+            response = "I'd be happy to help, but I don't have any documents to search through yet. Please upload some files first, and then I can answer questions about their content!"
+            st.markdown(response)
+            st.session_state.history.append({"role": "assistant", "content": response})
+    else:
+        # Process question with RAG
+        st.session_state.history.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant", avatar="🤖"):
+            placeholder = st.empty()
             
-            with st.chat_message("assistant", avatar="🤖"):
-                response = "I'd be happy to help, but I don't have any documents to search through yet. Please upload some files first, and then I can answer questions about their content!"
-                st.markdown(response)
-                st.session_state.history.append({"role": "assistant", "content": response})
-        else:
-            # Process question with RAG
-            st.session_state.history.append({"role": "user", "content": prompt})
-            with st.chat_message("user", avatar="👤"):
-                st.markdown(prompt)
-
-            with st.chat_message("assistant", avatar="🤖"):
-                placeholder = st.empty()
+            # Search for relevant documents
+            retrieved = st.session_state.vector_store.search(client, prompt)
+            
+            if not retrieved:
+                answer = "I couldn't find any relevant information in your uploaded documents for this question."
+                placeholder.markdown(answer)
+                st.session_state.history.append({"role": "assistant", "content": answer})
+            else:
+                context_text = format_context(retrieved)
                 
-                # Search for relevant documents
-                retrieved = st.session_state.vector_store.search(client, prompt)
-                
-                if not retrieved:
-                    answer = "I couldn't find any relevant information in your uploaded documents for this question."
-                    placeholder.markdown(answer)
-                    st.session_state.history.append({"role": "assistant", "content": answer})
-                else:
-                    context_text = format_context(retrieved)
-                    
-                    # Stream response
-                    try:
-                        stream = answer_with_rag(client, prompt, context_text)
-                        answer_accum = ""
-                        for chunk in stream:
-                            delta = chunk.choices[0].delta.content or ""
-                            answer_accum += delta
-                            placeholder.markdown(answer_accum)
-                        st.session_state.history.append({"role": "assistant", "content": answer_accum})
-                    except Exception as e:
-                        st.error(f"Error generating response: {e}")
+                # Stream response
+                try:
+                    stream = answer_with_rag(client, prompt, context_text)
+                    answer_accum = ""
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta.content or ""
+                        answer_accum += delta
+                        placeholder.markdown(answer_accum)
+                    st.session_state.history.append({"role": "assistant", "content": answer_accum})
+                except Exception as e:
+                    st.error(f"Error generating response: {e}")
 
-    # Chat controls
-    if st.session_state.history:
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("🔄 Clear Chat"):
-                st.session_state.history = []
-                st.rerun()
-        with col_b:
-            if st.button("🗑️ Clear All Data"):
-                st.session_state.vector_store = SimpleVectorStore()
-                st.session_state.history = []
-                st.success("All data cleared successfully!")
-                st.rerun()
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+# Chat controls (also outside columns)
+if st.session_state.history:
+    col_clear, col_reset = st.columns(2)
+    with col_clear:
+        if st.button("🔄 Clear Chat"):
+            st.session_state.history = []
+            st.rerun()
+    with col_reset:
+        if st.button("🗑️ Clear All Data"):
+            st.session_state.vector_store = SimpleVectorStore()
+            st.session_state.history = []
+            st.success("All data cleared successfully!")
+            st.rerun()
 
 st.markdown('</div>', unsafe_allow_html=True)
 
