@@ -3,6 +3,7 @@ import uuid
 import numpy as np
 from typing import List, Dict, Tuple
 from dataclasses import dataclass
+import time
 
 import streamlit as st
 import pandas as pd
@@ -28,21 +29,88 @@ load_dotenv()
 # -----------------------------
 
 def get_openai_client() -> OpenAI:
-    # Try multiple ways to get the API key
-    key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+    # Railway-specific environment variable handling
+    api_key = (
+        os.getenv("OPENAI_API_KEY") or 
+        os.getenv("OPENAI_API_KEY_SECRET") or 
+        st.secrets.get("OPENAI_API_KEY", None)
+    )
     
-    if not key:
-        st.error("No OpenAI API key found. Please set OPENAI_API_KEY in your environment variables or Streamlit secrets.")
+    if not api_key:
+        st.error("OpenAI API key not found. Please set OPENAI_API_KEY environment variable.")
+        st.info("For Railway: Set OPENAI_API_KEY in your environment variables")
         st.stop()
     
-    # Clean the key (remove any whitespace)
-    key = key.strip()
+    # Clean the key thoroughly - remove any potential invisible characters
+    api_key = api_key.strip().replace('\n', '').replace('\r', '').replace(' ', '').replace('\t', '')
+    
+    if not api_key.startswith("sk-"):
+        st.error("Invalid API key format. Key should start with 'sk-'")
+        st.stop()
+    
+    # Validate key length (OpenAI keys are typically 51-56 characters)
+    if len(api_key) < 40:
+        st.error(f"API key seems too short ({len(api_key)} characters). Expected ~51-56 characters.")
+        st.stop()
     
     try:
-        return OpenAI(api_key=key)
+        # Create client with specific settings for Railway
+        client = OpenAI(
+            api_key=api_key,
+            timeout=60.0,
+            max_retries=3,
+            # Explicitly set these for Railway compatibility
+            base_url="https://api.openai.com/v1",  # Ensure we're using the correct endpoint
+        )
+        return client
     except Exception as e:
-        st.error(f"Error initializing OpenAI client: {e}")
+        st.error(f"Failed to initialize OpenAI client: {e}")
         st.stop()
+
+def validate_openai_connection(client: OpenAI) -> bool:
+    """Validate OpenAI connection with comprehensive testing"""
+    try:
+        # Test 1: Simple completion (cheapest test)
+        st.write("🔍 Testing API connection...")
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "Hi"}],
+            max_tokens=1,
+            timeout=30
+        )
+        st.success("✅ Chat API working")
+        
+        # Test 2: Embedding API (this is where your error occurs)
+        st.write("🔍 Testing embeddings API...")
+        embedding_response = client.embeddings.create(
+            input=["test"],
+            model="text-embedding-3-small",
+            timeout=30
+        )
+        st.success("✅ Embeddings API working")
+        return True
+        
+    except Exception as e:
+        error_msg = str(e)
+        st.error(f"❌ API validation failed: {error_msg}")
+        
+        # Detailed error analysis
+        if "401" in error_msg:
+            st.error("🔑 API Key Issue Detected:")
+            st.write("- Your API key is invalid or expired")
+            st.write("- Go to https://platform.openai.com/api-keys")
+            st.write("- Generate a NEW API key (don't reuse old ones)")
+            st.write("- Make sure you have credits/usage available")
+        elif "403" in error_msg:
+            st.error("🚫 Permission Issue:")
+            st.write("- Your API key doesn't have embedding permissions")
+            st.write("- Check your OpenAI plan and usage limits")
+        elif "timeout" in error_msg.lower():
+            st.error("⏱️ Timeout Issue:")
+            st.write("- Network connectivity problems")
+            st.write("- Try again in a few seconds")
+        
+        return False
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
@@ -160,16 +228,16 @@ class SimpleVectorStore:
             # Extract texts
             texts = [chunk.text for chunk in chunks]
             
-            # Create embeddings
+            # Create embeddings with Railway-optimized settings
             st.write("Creating embeddings...")
-            embeddings = self.create_embeddings(client, texts)
+            embeddings = self.create_embeddings_with_retry(client, texts)
             
             if not embeddings:
                 return False
                 
             # Initialize FAISS index if needed
             if self.index is None:
-                self.index = faiss.IndexFlatIP(self.dimension)  # Inner product for cosine similarity
+                self.index = faiss.IndexFlatIP(self.dimension)
                 
             # Convert to numpy array and normalize for cosine similarity
             embeddings_array = np.array(embeddings).astype('float32')
@@ -190,37 +258,85 @@ class SimpleVectorStore:
             st.error(f"Error adding documents: {e}")
             return False
     
-    def create_embeddings(self, client: OpenAI, texts: List[str], batch_size: int = 50):
-        """Create embeddings for texts with better error handling"""
+    def create_embeddings_with_retry(self, client: OpenAI, texts: List[str], max_retries: int = 3):
+        """Create embeddings with retry logic and proper parameter handling"""
         all_embeddings = []
+        batch_size = 20  # Smaller batch size for Railway
         
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            try:
-                st.write(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
-                
-                response = client.embeddings.create(
-                    input=batch,
-                    model="text-embedding-3-small"
-                )
-                batch_embeddings = [data.embedding for data in response.data]
-                all_embeddings.extend(batch_embeddings)
-                
-            except Exception as e:
-                st.error(f"Error creating embeddings for batch {i//batch_size + 1}: {e}")
-                st.write("Retrying with smaller batch...")
-                
-                # Try individual texts if batch fails
-                for text in batch:
-                    try:
-                        response = client.embeddings.create(
-                            input=[text],
-                            model="text-embedding-3-small"
-                        )
-                        all_embeddings.extend([data.embedding for data in response.data])
-                    except Exception as e2:
-                        st.error(f"Failed to create embedding for individual text: {e2}")
+            batch_num = i // batch_size + 1
+            total_batches = (len(texts) + batch_size - 1) // batch_size
+            
+            st.write(f"Processing batch {batch_num}/{total_batches} ({len(batch)} texts)")
+            
+            # Clean and validate input texts
+            clean_batch = []
+            for text in batch:
+                if text and text.strip():
+                    # Ensure text is string and not too long
+                    clean_text = str(text).strip()[:8000]  # OpenAI has token limits
+                    clean_batch.append(clean_text)
+            
+            if not clean_batch:
+                continue
+            
+            for retry in range(max_retries):
+                try:
+                    # Use proper parameters for OpenAI embeddings API
+                    response = client.embeddings.create(
+                        input=clean_batch,
+                        model="text-embedding-3-small",
+                        encoding_format="float",  # Explicitly specify format
+                        dimensions=1536  # Specify dimensions for consistency
+                    )
+                    
+                    # Extract embeddings properly
+                    if response and response.data:
+                        batch_embeddings = [embedding.embedding for embedding in response.data]
+                        all_embeddings.extend(batch_embeddings)
+                        break
+                    else:
+                        raise Exception("Empty response from OpenAI API")
+                        
+                except Exception as e:
+                    error_str = str(e)
+                    
+                    if "401" in error_str:
+                        st.error(f"Authentication error: {error_str}")
+                        st.error("Double-check your API key is correctly set in Railway environment variables")
                         return []
+                    
+                    if retry < max_retries - 1:
+                        wait_time = (retry + 1) * 2
+                        st.warning(f"Batch {batch_num} failed (attempt {retry + 1}): {error_str}")
+                        st.warning(f"Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    else:
+                        st.error(f"Failed batch {batch_num} after {max_retries} attempts: {error_str}")
+                        
+                        # Try individual texts as last resort
+                        st.write("Attempting individual text processing...")
+                        individual_success = True
+                        for single_text in clean_batch:
+                            try:
+                                single_response = client.embeddings.create(
+                                    input=[single_text],
+                                    model="text-embedding-3-small",
+                                    encoding_format="float"
+                                )
+                                if single_response and single_response.data:
+                                    all_embeddings.extend([emb.embedding for emb in single_response.data])
+                                else:
+                                    individual_success = False
+                                    break
+                            except Exception as e2:
+                                st.error(f"Individual text processing failed: {e2}")
+                                individual_success = False
+                                break
+                        
+                        if not individual_success:
+                            return []
                 
         return all_embeddings
     
@@ -230,8 +346,8 @@ class SimpleVectorStore:
             return []
             
         try:
-            # Create query embedding
-            query_embedding = self.create_embeddings(client, [query])
+            # Create query embedding with retry
+            query_embedding = self.create_embeddings_with_retry(client, [query])
             if not query_embedding:
                 return []
                 
@@ -301,7 +417,8 @@ def answer_with_rag(client: OpenAI, question: str, context_text: str):
         model="gpt-4o-mini",
         messages=messages,
         temperature=0.0,
-        stream=True
+        stream=True,
+        timeout=60
     )
 
 # -----------------------------
@@ -436,29 +553,35 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize OpenAI client with fallback
-@st.cache_resource
-def initialize_client():
-    # Try multiple ways to get the API key
-    key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
-    
-    if not key:
-        st.warning("OpenAI API key not found in environment variables.")
-        key = st.text_input("Enter your OpenAI API key:", type="password", help="Get your API key from https://platform.openai.com/api-keys")
-        if not key:
-            st.stop()
-    
-    key = key.strip()
-    return get_openai_client_with_key(key)
+# Initialize OpenAI client with manual input fallback
+if "manual_api_key" not in st.session_state:
+    st.session_state.manual_api_key = False
 
-def get_openai_client_with_key(key: str) -> OpenAI:
-    try:
-        return OpenAI(api_key=key)
-    except Exception as e:
-        st.error(f"Error initializing OpenAI client: {e}")
+# Check if we should use manual input
+if st.sidebar.button("Use Manual API Key Input"):
+    st.session_state.manual_api_key = True
+
+if st.session_state.manual_api_key:
+    st.sidebar.warning("Manual API key mode enabled")
+    manual_key = st.sidebar.text_input("Enter OpenAI API Key:", type="password")
+    if manual_key:
+        client = OpenAI(api_key=manual_key.strip())
+        st.sidebar.success("Using manual API key")
+    else:
+        st.error("Please enter your API key in the sidebar")
         st.stop()
+else:
+    client = get_openai_client()
 
-client = initialize_client()
+# Validate connection on startup (Railway-friendly)
+if "api_validated" not in st.session_state:
+    with st.spinner("Validating OpenAI connection..."):
+        if validate_openai_connection(client):
+            st.session_state.api_validated = True
+            st.success("OpenAI API connection validated!")
+        else:
+            st.error("Failed to validate OpenAI API connection. Please check your API key.")
+            st.stop()
 
 # Session state
 if "history" not in st.session_state:
@@ -563,7 +686,7 @@ with col1:
                         continue
                 
                 if rag_chunks:
-                    st.write(f"Processing {len(rag_chunks)} chunks...")
+                    st.write(f"Processing {len(rag_chunks)} chunks with Railway-optimized settings...")
                     success = st.session_state.vector_store.add_documents(client, rag_chunks)
                     
                     if success:
@@ -650,7 +773,7 @@ with col2:
 # Close main container
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Chat input (outside columns to avoid Streamlit restriction)
+# Chat input (outside columns)
 prompt = st.chat_input("Ask K&B Scout AI about your documents...")
 
 if prompt:
