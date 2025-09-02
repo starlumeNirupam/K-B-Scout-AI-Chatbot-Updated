@@ -169,10 +169,12 @@ class SimpleVectorStore:
                 
             # Initialize FAISS index if needed
             if self.index is None:
-                self.index = faiss.IndexFlatIP(self.dimension)  # Inner product for cosine similarity
+                # Use IndexFlatL2 for L2 distance, then convert to cosine similarity
+                self.index = faiss.IndexFlatL2(self.dimension)
                 
             # Convert to numpy array and normalize for cosine similarity
             embeddings_array = np.array(embeddings).astype('float32')
+            # Normalize vectors for cosine similarity
             faiss.normalize_L2(embeddings_array)
             
             # Add to FAISS index
@@ -225,7 +227,7 @@ class SimpleVectorStore:
         return all_embeddings
     
     def search(self, client: OpenAI, query: str, top_k: int = 6):
-        """Search for similar documents"""
+        """Search for similar documents using cosine similarity"""
         if self.index is None or len(self.documents) == 0:
             return []
             
@@ -235,20 +237,24 @@ class SimpleVectorStore:
             if not query_embedding:
                 return []
                 
-            # Search
+            # Search - normalize query vector for cosine similarity
             query_vector = np.array(query_embedding).astype('float32')
             faiss.normalize_L2(query_vector)
             
-            scores, indices = self.index.search(query_vector, min(top_k, len(self.documents)))
+            # For normalized vectors in IndexFlatL2, L2 distance relates to cosine similarity:
+            # cosine_similarity = 1 - (L2_distance^2 / 2)
+            distances, indices = self.index.search(query_vector, min(top_k, len(self.documents)))
             
             # Return results
             results = []
-            for score, idx in zip(scores[0], indices[0]):
-                if idx < len(self.documents):
+            for distance, idx in zip(distances[0], indices[0]):
+                if idx < len(self.documents) and idx >= 0:  # Valid index check
+                    # Convert L2 distance to cosine similarity for normalized vectors
+                    cosine_similarity = 1 - (distance * distance / 2)
                     results.append((
                         self.documents[idx],
                         self.metadatas[idx],
-                        1 - score  # Convert similarity to distance
+                        cosine_similarity  # Higher score means more similar
                     ))
             
             return results
@@ -271,7 +277,7 @@ class SimpleVectorStore:
 
 def format_context(snippets: List[Tuple[str, Dict, float]]) -> str:
     blocks = []
-    for i, (doc, meta, dist) in enumerate(snippets, 1):
+    for i, (doc, meta, score) in enumerate(snippets, 1):
         src = meta.get("source", "unknown")
         if meta.get("type") == "pdf":
             loc = f"page {meta.get('page', 'unknown')}"
