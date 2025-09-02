@@ -9,3 +9,4 @@ faiss-cpu==1.7.4
 numpy==1.24.3
 openpyxl==3.1.2
 httpx==0.24.1
+pytesseract==0.3.13
