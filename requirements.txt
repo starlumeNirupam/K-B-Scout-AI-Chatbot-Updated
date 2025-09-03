@@ -82,7 +82,7 @@ pypdfium2
 PyPika
 pyproject_hooks
 pyreadline3
-pysqlite3-binary
+#pysqlite3-binary
 pytesseract
 python-dateutil
 python-dotenv
